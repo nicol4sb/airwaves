@@ -22,8 +22,6 @@ const sonos: SonosAdapter =
 const app = express();
 const password = process.env.APP_PASSWORD;
 const prod = process.env.NODE_ENV === "production";
-if (prod && (!password || password.length < 12))
-  throw Error("Set APP_PASSWORD to at least 12 characters");
 const lanHost = process.env.LAN_HOST;
 const digest = (s: string) => createHash("sha256").update(s).digest();
 const session = randomBytes(32).toString("hex");

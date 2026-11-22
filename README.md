@@ -30,7 +30,7 @@ Build once with `npm run build`. In the project’s `.env`, set `LAN_HOST` to th
 
 1. Use a 64-bit Raspberry Pi OS installation with Docker Engine and the Compose plugin. Connect the Pi to the same LAN as the Sonos devices. Reserve the Pi’s IP address in DHCP.
 2. Create a local DNS record, for example `airwave.home.arpa`, pointing to the Pi. Configure the iPhone to use that DNS resolver on Wi-Fi. Use this hostname consistently for installation and playback.
-3. Copy the repository to the Pi. Run `cp .env.example .env`, set `APP_HOST` to the DNS name and set a unique, random `APP_PASSWORD` of at least 12 characters. Use `chmod 600 .env`.
+3. Copy the repository to the Pi. Run `cp .env.example .env`, set `APP_HOST` to the DNS name and leave `APP_PASSWORD` blank if you want password-free access on your private network. Use `chmod 600 .env`.
 4. Run `docker compose up -d --build`, followed by `docker compose ps` and `docker compose logs --tail=80 app caddy`. The Node and Caddy base images have ARM64 variants. Both services use Linux host networking. Only Caddy serves the LAN. Express binds to loopback. Keep router port forwarding disabled for this deployment.
 5. Export the **public root certificate** with `docker compose cp caddy:/data/caddy/pki/authorities/local/root.crt ./airwave-root.crt`. Transfer it to your iPhone over a trusted channel such as AirDrop. Install the downloaded profile in Settings → General → VPN & Device Management, then enable trust in Settings → General → About → Certificate Trust Settings. Keep the CA private key on the server.
 6. Open `https://airwave.home.arpa` in Safari, sign in, then choose Share → Add to Home Screen. Open the installed app online once and download an episode there. Keep using the same scheme, host and port. A different origin gets a different library on the phone.
@@ -41,7 +41,7 @@ Caddy owns ports 80 and 443. The internal CA and its keys persist in `caddy_data
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| APP_PASSWORD | required in production | Single-user password |
+| APP_PASSWORD | empty | Set to enable single-user password authentication |
 | APP_HOST | airwave.home.arpa | Caddy’s stable HTTPS name |
 | DATA_DIR / AUDIO_DIR | data / data/audio | SQLite directory and cache directory outside Compose |
 | PORT | 4173 | Loopback API and bundled UI port |
@@ -69,7 +69,7 @@ Compose sets DATA_DIR to /data and AUDIO_DIR to /audio. If changing the producti
 
 To move the main backend to a VPS, implement the SonosAdapter interface with an authenticated private-network client, keeping the current LAN implementation on the Pi. That transport is a future deployment step. Keep UDP discovery and TCP 1400 local. Use a VPN or authenticated tunnel between VPS and Pi. Moving the HTTPS origin requires rebuilding the phone’s local downloads.
 
-Production uses a random HttpOnly, Secure, SameSite session cookie after password login. Restarting the backend invalidates online sessions. Authenticated mutations require a custom request header and the server grants no cross-origin access. The offline library remains accessible on an unlocked phone. Only public HTTP(S) feed and server audio destinations are accepted. Each redirect gets fresh address validation and the socket connects to a validated IP. The local Sonos network path is separate.
+When APP_PASSWORD is configured, Airwave uses an HttpOnly, Secure, SameSite session cookie after password login. With APP_PASSWORD blank, LAN users can access the app without signing in. Restarting the backend invalidates online sessions. Authenticated mutations require a custom request header and the server grants no cross-origin access. The offline library remains accessible on an unlocked phone. Only public HTTP(S) feed and server audio destinations are accepted. Each redirect gets fresh address validation and the socket connects to a validated IP. The local Sonos network path is separate.
 
 ## Acceptance checks on your hardware
 
