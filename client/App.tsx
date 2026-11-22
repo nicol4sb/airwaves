@@ -126,8 +126,8 @@ function Cassette({ name }: { name: string }) {
 }
 export default function App() {
   const [lib, setLib] = useState<Library>(empty),
-    [tab, setTab] = useState("Episodes"),
-    [filter, setFilter] = useState("Unplayed"),
+    [tab, setTab] = useState("Podcasts"),
+    [filter, setFilter] = useState("All"),
     [detail, setPodcastId] = useState(""),
     [count, setVisibleCount] = useState(15);
   const [modal, setModal] = useState(""),
@@ -476,6 +476,24 @@ export default function App() {
     await put("skip:" + e.id, true);
     setSaved(await downloads());
   }
+  async function markPodcastRead(podcastId: string) {
+    const unread = lib.episodes.filter((e) => e.podcastId === podcastId && !e.played);
+    const updated = Date.now();
+    setLib((currentLib) => ({
+      ...currentLib,
+      episodes: currentLib.episodes.map((e) =>
+        e.podcastId === podcastId && !e.played
+          ? { ...e, played: 1, updated }
+          : e,
+      ),
+    }));
+    await Promise.all(unread.map((e) => saveProgress({
+      id: e.id,
+      position: e.position,
+      played: true,
+      updated,
+    })));
+  }
   useEffect(() => {
     if (!online || !ready || !lib.episodes.length) return;
     let stop = false;
@@ -558,14 +576,9 @@ export default function App() {
     ["Queue", ListMusic],
   ] as const;
   const eps = (
-    tab === "Queue"
-      ? lib.queue
-          .map((i) => lib.episodes.find((e) => e.id === i))
-          .filter((e): e is Episode => !!e)
-      : lib.episodes
+    lib.episodes
   ).filter(
     (e) =>
-      tab === "Queue" ||
       (detail
         ? e.podcastId === detail
         : filter === "Unplayed"
@@ -752,66 +765,22 @@ export default function App() {
         </div>
       </header>
       <main>
-        <div className="pagehead">
-          <div className="over">
-            <span className="tinyline" /> YOUR LIBRARY
-          </div>
-          <h1>
-            {detail ? lib.podcasts.find((p) => p.id === detail)?.title : tab}
-          </h1>
-        </div>
         {!online && (
           <div className="notice">
             <WifiOff size={16} /> Offline library
           </div>
         )}
-        {tab === "Episodes" && hero && (
-          <section className="hero">
-            <div className="herocopy">
-              <div className="heroeyebrow">
-                <Headphones size={16} />
-                {recent.length ? "Continue listening" : "Featured episode"}
-              </div>
-              <h2>{hero.title}</h2>
-              <div className="herometa">
-                {name(hero)} <span>·</span> {minutes(hero.duration)}
-              </div>
-              {hero.position > 0 && (
-                <progress
-                  value={hero.position}
-                  max={hero.duration || hero.position}
-                />
-              )}
-              <button
-                className="primary"
-                onClick={() =>
-                  run(() => (id === hero.id ? toggle() : start(hero)))
-                }
-              >
-                {playing && id === hero.id ? <Pause /> : <Play />}
-                {playing && id === hero.id
-                  ? "Pause"
-                  : hero.position
-                    ? "Resume episode"
-                    : "Play episode"}
-              </button>
-            </div>
-            <Cassette name={name(hero)} />
-          </section>
-        )}
-        {tab === "Podcasts" && !detail ? (
+        {!detail ? (
           <>
             <div className="sectionhead">
-              <h2>
-                Subscriptions <em>{lib.podcasts.length}</em>
-              </h2>
-              <button className="secondary" onClick={() => show("add")}>
-                <Plus size={17} /> Add podcast
+              <span />
+              <button className="icon" aria-label="Add podcast" onClick={() => show("add")}>
+                <Plus size={19} />
               </button>
             </div>
             {lib.podcasts.map((p) => (
               <div
-                className="subscription-swipe"
+                className={"subscription-swipe " + (swipedPodcast === p.id ? "swiped" : "")}
                 key={p.id}
                 onPointerDown={(event) => {
                   if (event.pointerType === "mouse" && event.button !== 0) return;
@@ -866,24 +835,25 @@ export default function App() {
                   <div>
                     <b>{p.title}</b>
                     <small>
-                      {lib.episodes.filter((e) => e.podcastId === p.id).length}{" "}
-                      episodes {p.error ? " · Refresh pending" : ""}
+                      {lib.episodes.filter((e) => e.podcastId === p.id && !e.played).length} new
+                      {p.error ? " · Refresh pending" : ""}
                     </small>
                   </div>
+                  {lib.episodes.some((e) => e.podcastId === p.id && !e.played) && <i className="unread-dot" aria-label="Unread episodes" />}
                   <ChevronRight />
                 </button>
                 {swipedPodcast === p.id && (
-                  <button
-                    className="subscription-delete"
-                    aria-label={"Unsubscribe from " + p.title}
-                    onClick={() => {
+                  <div className="subscription-actions">
+                    <button onClick={() => {
                       setPodcastId(p.id);
                       setModal("remove");
                       setSwipedPodcast("");
-                    }}
-                  >
-                    <Trash2 size={17} /> Delete
-                  </button>
+                    }}><Trash2 size={17} /> Delete</button>
+                    <button onClick={() => {
+                      run(() => markPodcastRead(p.id));
+                      setSwipedPodcast("");
+                    }}>Mark all read</button>
+                  </div>
                 )}
               </div>
             ))}
@@ -891,18 +861,7 @@ export default function App() {
         ) : (
           <>
             <div className="sectionhead">
-              <h2>
-                {detail ? (
-                  <button onClick={() => setPodcastId("")}>
-                    <ArrowLeft size={18} /> Podcasts
-                  </button>
-                ) : tab === "Queue" ? (
-                  "Up next"
-                ) : (
-                  "Latest episodes"
-                )}{" "}
-                <em>{eps.length}</em>
-              </h2>
+              <h2><button onClick={() => setPodcastId("")}><ArrowLeft size={18} /> Podcasts</button></h2>
               {detail && (
                 <button
                   className="secondary"
@@ -911,7 +870,7 @@ export default function App() {
                   Unsubscribe
                 </button>
               )}
-              {tab === "Episodes" && (
+              {detail && (
                 <div className="filters">
                   {["Unplayed", "All", "Downloaded"].map((f) => (
                     <button
@@ -941,9 +900,7 @@ export default function App() {
               <p className="empty">
                 {!ready
                   ? "Loading library…"
-                  : tab === "Queue"
-                    ? "Add episodes with the + button to build your queue."
-                    : filter === "Downloaded"
+                  : filter === "Downloaded"
                       ? "Downloaded episodes will appear here."
                       : "No episodes here yet."}
               </p>
@@ -951,69 +908,6 @@ export default function App() {
           </>
         )}
       </main>
-      <footer>
-        {selected && (
-          <div className="minibar">
-            <div className="mini">
-              <button className="minititle" onClick={() => setModal("player")}>
-                <Art e={selected} />
-                <div>
-                  <div className="eyebrow">
-                    {episode ? "Now playing" : "Ready to play"}
-                  </div>
-                  <b>{selected.title}</b>
-                  <small>{name(selected)}</small>
-                </div>
-              </button>
-              <div className="actions">
-                <IconButton label="Playback device" click={devices}>
-                  <Cast />
-                </IconButton>
-                <button
-                  className="round big"
-                  aria-label="Play or pause"
-                  onClick={() => run(toggle)}
-                >
-                  {playing ? <Pause /> : <Play />}
-                </button>
-                <IconButton
-                  label="Next queued episode"
-                  click={() =>
-                    lib.queue.length ? run(next) : msg("Queue is empty")
-                  }
-                >
-                  <SkipForward />
-                </IconButton>
-              </div>
-            </div>
-            <div className="track">
-              <i
-                style={{
-                  width:
-                    Math.min(100, (pos / (selected.duration || 1)) * 100) + "%",
-                }}
-              />
-            </div>
-          </div>
-        )}
-        <nav>
-          {tabs.map(([t, Icon]) => (
-            <button
-              key={t}
-              aria-current={tab === t ? "page" : undefined}
-              onClick={() => {
-                setTab(t);
-                setPodcastId("");
-                setVisibleCount(15);
-                window.scrollTo(0, 0);
-              }}
-            >
-              <Icon size={20} />
-              {t}
-            </button>
-          ))}
-        </nav>
-      </footer>
       {message && (
         <button className="toast" role="status" onClick={() => msg("")}>
           {message}

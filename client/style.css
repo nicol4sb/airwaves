@@ -147,7 +147,7 @@ select {
   transform: translateX(1px);
 }
 main {
-  padding-bottom: 195px;
+  padding-bottom: 40px;
 }
 .pagehead {
   padding: 34px 0 20px;
@@ -516,6 +516,9 @@ small span {
   -webkit-touch-callout: none;
   user-select: none;
 }
+.subscription-swipe.swiped .subscription {
+  min-width: 55%;
+}
 .subscription {
   display: flex;
   align-items: center;
@@ -529,16 +532,35 @@ small span {
   text-align: left;
   margin: 0;
 }
-.subscription-delete {
+.subscription-actions {
   display: flex;
-  flex: none;
-  align-items: center;
-  gap: 7px;
-  padding: 0 16px;
+  flex-direction: column;
+  justify-content: stretch;
+  gap: 4px;
   margin-left: 8px;
-  border-radius: 10px;
+}
+.subscription-actions button {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-width: 116px;
+  border-radius: 9px;
   background: #a83e4b;
   color: white;
+  font-size: 12px;
+}
+.subscription-actions button + button {
+  background: #514366;
+}
+.unread-dot {
+  width: 9px;
+  height: 9px;
+  margin-left: auto;
+  flex: none;
+  border-radius: 50%;
+  background: var(--accent);
 }
 .subscription svg:last-child {
   margin-left: auto;
@@ -595,33 +617,6 @@ small span {
   display: block;
   height: 100%;
   background: var(--accent);
-}
-footer {
-  position: fixed;
-  bottom: 0;
-  left: 0;
-  right: 0;
-  z-index: 3;
-  background: #1b191e;
-  padding-bottom: env(safe-area-inset-bottom);
-}
-nav {
-  display: flex;
-  justify-content: center;
-  gap: 60px;
-  height: 60px;
-}
-nav button {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 9px;
-  font-size: 14px;
-  color: var(--sub);
-  min-width: 105px;
-}
-nav button[aria-current] {
-  color: var(--accent);
 }
 .scrim {
   position: fixed;
