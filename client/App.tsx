@@ -522,6 +522,20 @@ export default function App() {
       setSearching(false);
     }
   }
+  async function addPodcast(url: string) {
+    if (busy) return;
+    setBusy(true);
+    try {
+      await request("podcasts", "POST", { url });
+      setModal("");
+      msg("Podcast added");
+      await refresh();
+    } catch (e) {
+      report(e);
+    } finally {
+      setBusy(false);
+    }
+  }
   const show = (m: string) => {
     setInput("");
     setSearch("");
@@ -992,17 +1006,13 @@ export default function App() {
                 {searchResults.length > 0 && (
                   <div className="podcast-results" aria-label="Search results">
                     {searchResults.map((result) => (
-                      <button key={result.url} type="button" onClick={() => { setInput(result.url); setSearchResults([]); }}>
+                      <button key={result.url} type="button" disabled={busy} onClick={() => void addPodcast(result.url)}>
                         {result.image && <img src={result.image} alt="" />}
-                        <span><strong>{result.title}</strong>{result.author && <small>{result.author}</small>}</span>
+                        <span><strong>{busy ? "Adding…" : result.title}</strong>{result.author && <small>{result.author}</small>}</span>
                       </button>
                     ))}
                   </div>
                 )}
-                <form onSubmit={submit}>
-                  <label>RSS feed URL<input required type="url" placeholder="https://example.com/feed.xml" value={input} onChange={(e) => setInput(e.target.value)} /></label>
-                  <button className="primary" disabled={busy}>{busy ? "Connecting…" : "Subscribe"}</button>
-                </form>
               </>
             )}
             {modal === "login" && (
