@@ -14,18 +14,33 @@ class Phone implements Playback {
     if (this.objectURL) URL.revokeObjectURL(this.objectURL);
     this.objectURL = "";
     const offlineURL = localAudioURL(e.id);
-    const src = offlineURL ?? (
-      e.cached === "ready" ||
-      (location.protocol === "https:" && e.audio.startsWith("http:"))
-        ? "/api/audio/" + e.id
-        : e.audio
-    );
     if (!offlineURL && !navigator.onLine)
       throw Error("This episode is not downloaded to this phone.");
+    if (offlineURL) {
+      await this.playURL(offlineURL, position);
+      return;
+    }
+
+    // Prefer the Pi's cached copy when it is reachable. If the server is down
+    // or away from home, stream directly from the publisher URL saved in the
+    // local library.
+    if (e.cached === "ready") {
+      try {
+        await this.playURL("/api/audio/" + e.id, position);
+        return;
+      } catch {
+        // A failed server request can leave the media element in an error state.
+        audio.pause();
+        audio.removeAttribute("src");
+        audio.load();
+      }
+    }
+    await this.playURL(e.audio, position);
+  }
+  private async playURL(src: string, position: number) {
     audio.src = src;
     audio.currentTime = position;
-    const playback = audio.play();
-    await playback;
+    await audio.play();
   }
   async pause() {
     audio.pause();
