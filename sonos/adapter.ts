@@ -3,6 +3,7 @@ import { XMLParser } from "fast-xml-parser";
 import type { Speaker, Status } from "../shared/types";
 export interface SonosAdapter {
   discover(): Promise<Speaker[]>;
+  cached(): Speaker[] | undefined;
   start(id: string, tracks: string[], position: number): Promise<void>;
   control(
     id: string,
@@ -83,21 +84,17 @@ export class LocalSonos implements SonosAdapter {
     { host: string; name: string; system: string }
   >();
   private scanning?: Promise<Speaker[]>;
-  private scannedAt = 0;
+  private hasScanned = false;
 
   discover() {
-    const age = Date.now() - this.scannedAt;
-    if (age < 30_000 && this.scannedAt) {
-      if (!this.scanning)
-        this.scanning = this.scan().finally(() => {
-          this.scanning = undefined;
-        });
-      return Promise.resolve(this.list());
-    }
     if (this.scanning) return this.scanning;
     return (this.scanning = this.scan().finally(() => {
       this.scanning = undefined;
     }));
+  }
+
+  cached() {
+    return this.hasScanned ? this.list() : undefined;
   }
 
   private list() {
@@ -137,7 +134,7 @@ export class LocalSonos implements SonosAdapter {
       }),
     );
     this.devices = found;
-    this.scannedAt = Date.now();
+    this.hasScanned = true;
     return this.list();
   }
   private async target(id: string) {
@@ -246,6 +243,9 @@ export class LocalSonos implements SonosAdapter {
 export class MockSonos implements SonosAdapter {
   state: Status = { audio: "", playing: false, position: 0, volume: 30 };
   async discover() {
+    return [{ id: "mock", name: "Studio (mock)", system: "Mock" }];
+  }
+  cached() {
     return [{ id: "mock", name: "Studio (mock)", system: "Mock" }];
   }
   async start(_id: string, tracks: string[], position: number) {

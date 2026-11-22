@@ -7,8 +7,13 @@ import { DEFAULT_FEED, hash } from "./rss";
 import { externalURL, fetchXML } from "./network";
 import { AudioCache } from "./cache";
 import { LocalSonos, MockSonos, type SonosAdapter } from "../sonos/adapter";
-if (process.env.NODE_ENV !== "production" && existsSync(".env"))
-  process.loadEnvFile(".env");
+if (process.env.NODE_ENV !== "production") {
+  try {
+    process.loadEnvFile(".env");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+}
 const dir = resolve(process.env.DATA_DIR ?? "data");
 mkdirSync(dir, { recursive: true });
 const db = database(join(dir, "library.sqlite"));
@@ -169,7 +174,10 @@ app.get("/api/audio/:id", async (q, r) => {
     { cacheControl: false },
   );
 });
-app.get("/api/speakers", async (_q, r) => r.json(await sonos.discover()));
+app.get("/api/speakers", async (_q, r) => {
+  r.json(sonos.cached() ?? await sonos.discover());
+});
+app.post("/api/speakers/scan", async (_q, r) => r.json(await sonos.discover()));
 app.get("/api/speakers/:id", async (q, r) =>
   r.json(await sonos.status(q.params.id)),
 );

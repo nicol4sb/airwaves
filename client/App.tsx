@@ -126,8 +126,8 @@ function Cassette({ name }: { name: string }) {
 }
 export default function App() {
   const [lib, setLib] = useState<Library>(empty),
-    [tab, setTab] = useState("Podcasts"),
-    [filter, setFilter] = useState("All"),
+    [tab, setTab] = useState("Episodes"),
+    [filter, setFilter] = useState("Unplayed"),
     [detail, setPodcastId] = useState(""),
     [count, setVisibleCount] = useState(15);
   const [modal, setModal] = useState(""),
@@ -147,7 +147,9 @@ export default function App() {
   const [saved, setSaved] = useState<string[]>([]),
     [percent, setDownloadProgress] = useState<Record<string, number>>({}),
     [auto, setAutoCount] = useState(0);
-  const [speakers, setSpeakers] = useState<Speaker[]>([]),
+  const [speakers, setSpeakers] = useState<Speaker[]>(),
+    [scanning, setScanning] = useState(false),
+    [speakerError, setSpeakerError] = useState(""),
     [remote, setRemote] = useState<Remote | null>(null),
     [volume, setVolume] = useState(25);
   const [foreground, setForeground] = useState(0);
@@ -237,8 +239,8 @@ export default function App() {
     await saveProgress(p);
   }
   async function queue(ids: string[]) {
-    await put("queue", ids);
     setLib((l) => ({ ...l, queue: ids }));
+    await put("queue", ids);
     if (online) await refresh();
   }
   async function start(e: Episode, position = e.played ? 0 : e.position) {
@@ -439,17 +441,40 @@ export default function App() {
     setRemote(target);
     setModal("");
   }
-  async function scan() {
-    setBusy(true);
+  const readingSpeakers = useRef<symbol | null>(null);
+  async function loadSpeakers(rescan = false) {
+    if (!rescan && readingSpeakers.current) return;
+    const read = Symbol();
+    readingSpeakers.current = read;
+    setScanning(rescan);
+    setSpeakerError("");
     try {
-      setSpeakers(await request<Speaker[]>("speakers"));
+      const rooms = rescan
+        ? await request<Speaker[]>("speakers/scan", "POST")
+        : await request<Speaker[]>("speakers");
+      if (readingSpeakers.current === read) setSpeakers(rooms);
+    } catch (error) {
+      if (readingSpeakers.current === read)
+        setSpeakerError(error instanceof Error ? error.message : "Could not load Sonos speakers.");
     } finally {
-      setBusy(false);
+      if (readingSpeakers.current === read) {
+        readingSpeakers.current = null;
+        setScanning(false);
+      }
     }
   }
+  useEffect(() => {
+    if (!online || !ready) return;
+    const prefetch = () => {
+      if (!document.hidden) void loadSpeakers();
+    };
+    prefetch();
+    const timer = window.setInterval(prefetch, 60_000);
+    return () => window.clearInterval(timer);
+  }, [online, ready, foreground]);
   function devices() {
     setModal("devices");
-    run(scan);
+    void loadSpeakers();
   }
   async function save(e: Episode, manual = true) {
     if (running.current.has(e.id)) return;
@@ -640,16 +665,18 @@ export default function App() {
     ["Queue", ListMusic],
   ] as const;
   const eps = (
-    lib.episodes
+    tab === "Queue"
+      ? lib.queue.map((i) => lib.episodes.find((e) => e.id === i)).filter((e): e is Episode => !!e)
+      : lib.episodes
   ).filter(
     (e) =>
-      (detail
+      (tab === "Queue" || (detail
         ? e.podcastId === detail
         : filter === "Unplayed"
           ? !e.played
           : filter === "Downloaded"
             ? saved.includes(e.id)
-            : true),
+            : true)),
   );
   const row = (e: Episode, index: number) => (
     <article
@@ -829,17 +856,36 @@ export default function App() {
         </div>
       </header>
       <main>
+        <div className="pagehead">
+          <div className="over"><span className="tinyline" /> YOUR LIBRARY</div>
+          <h1>{detail ? lib.podcasts.find((p) => p.id === detail)?.title : tab}</h1>
+        </div>
         {!online && (
           <div className="notice">
             <WifiOff size={16} /> Offline library
           </div>
         )}
-        {!detail ? (
+        {tab === "Episodes" && hero && (
+          <section className="hero">
+            <div className="herocopy">
+              <div className="heroeyebrow"><Headphones size={16} />{recent.length ? "Continue listening" : "Featured episode"}</div>
+              <h2>{hero.title}</h2>
+              <div className="herometa">{name(hero)} <span>·</span> {minutes(hero.duration)}</div>
+              {hero.position > 0 && <progress value={hero.position} max={hero.duration || hero.position} />}
+              <button className="primary" onClick={() => run(() => (id === hero.id ? toggle() : start(hero)))}>
+                {playing && id === hero.id ? <Pause /> : <Play />}
+                {playing && id === hero.id ? "Pause" : hero.position ? "Resume episode" : "Play episode"}
+              </button>
+            </div>
+            <Art e={hero} />
+          </section>
+        )}
+        {tab === "Podcasts" && !detail ? (
           <>
             <div className="sectionhead">
-              <span />
-                  <button className="add-podcast" aria-label="Add podcast" onClick={() => show("add")}>
-                <Plus size={19} />
+              <h2>Podcasts <em>{lib.podcasts.length}</em></h2>
+              <button className="add-podcast" aria-label="Add podcast" onClick={() => show("add")}>
+                <Plus size={20} /> <span>Add podcast</span>
               </button>
             </div>
             {lib.podcasts.map((p) => (
@@ -921,7 +967,7 @@ export default function App() {
         ) : (
           <>
             <div className="sectionhead">
-              <h2><button onClick={() => setPodcastId("")}><ArrowLeft size={18} /> Podcasts</button></h2>
+              <h2>{detail ? <button onClick={() => setPodcastId("")}><ArrowLeft size={18} /> Podcasts</button> : tab === "Queue" ? "Up next" : "Latest episodes"} <em>{eps.length}</em></h2>
               {detail && (
                 <button
                   className="secondary"
@@ -930,7 +976,7 @@ export default function App() {
                   Unsubscribe
                 </button>
               )}
-              {detail && (
+              {tab === "Episodes" && (
                 <div className="filters">
                   {["Unplayed", "All", "Downloaded"].map((f) => (
                     <button
@@ -968,6 +1014,40 @@ export default function App() {
           </>
         )}
       </main>
+      <footer>
+        {selected && (
+          <div className="minibar">
+            <div className="mini">
+              <button className="minititle" onClick={() => setModal("player")}>
+                <Art e={selected} />
+                <div>
+                  <div className="eyebrow">{episode ? "Now playing" : "Ready to play"}</div>
+                  <b>{selected.title}</b>
+                  <small>{name(selected)}</small>
+                </div>
+              </button>
+              <div className="actions">
+                <IconButton label="Playback device" click={devices}><Cast /></IconButton>
+                <button className="round big" aria-label="Play or pause" onClick={() => run(toggle)}>{playing ? <Pause /> : <Play />}</button>
+                <IconButton label="Next queued episode" click={() => lib.queue.length ? run(next) : msg("Queue is empty")}><SkipForward /></IconButton>
+              </div>
+            </div>
+            <div className="track"><i style={{ width: Math.min(100, (pos / (selected.duration || 1)) * 100) + "%" }} /></div>
+          </div>
+        )}
+        <nav>
+          {tabs.map(([t, Icon]) => (
+            <button key={t} aria-current={tab === t ? "page" : undefined} onClick={() => {
+              setTab(t);
+              setPodcastId("");
+              setVisibleCount(15);
+              window.scrollTo(0, 0);
+            }}>
+              <Icon size={20} />{t}
+            </button>
+          ))}
+        </nav>
+      </footer>
       {message && (
         <button className="toast" role="status" onClick={() => msg("")}>
           {message}
@@ -1146,7 +1226,7 @@ export default function App() {
                   <Smartphone />
                   This device {!remote && <Check />}
                 </button>
-                {speakers.map((s) => (
+                {speakers?.map((s) => (
                   <button
                     className="option"
                     key={s.id}
@@ -1175,13 +1255,15 @@ export default function App() {
                 )}
                 <button
                   className="secondary"
-                  disabled={busy}
-                  onClick={() => run(scan)}
+                  disabled={scanning}
+                  onClick={() => void loadSpeakers(true)}
                 >
                   <RefreshCw size={16} />
-                  {busy ? "Scanning…" : "Scan for speakers"}
+                  {scanning ? "Scanning…" : "Scan for speakers"}
                 </button>
-                {!busy && !speakers.length && (
+                {speakerError && <p role="alert">{speakerError}</p>}
+                {!speakerError && !speakers && !scanning && <p>Loading speakers…</p>}
+                {!speakerError && !scanning && speakers?.length === 0 && (
                   <p>No Sonos speakers found on the server’s network.</p>
                 )}
               </>

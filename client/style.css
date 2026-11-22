@@ -147,7 +147,7 @@ select {
   transform: translateX(1px);
 }
 main {
-  padding-bottom: 40px;
+  padding-bottom: 195px;
 }
 .pagehead {
   padding: 34px 0 20px;
@@ -190,9 +190,19 @@ h1 {
   display: flex;
   align-items: center;
   min-height: 239px;
-  background: #c6b4e5;
+  background: linear-gradient(112deg, #cbb7f0 0%, #ad98d2 58%, #74648e 100%);
   border-radius: 20px;
   color: #271f32;
+}
+.hero > .art {
+  position: absolute;
+  z-index: 0;
+  right: 34px;
+  width: min(31vw, 218px);
+  height: min(31vw, 218px);
+  border-radius: 22px;
+  box-shadow: 0 22px 44px #21182d55;
+  transform: rotate(3deg);
 }
 .herocopy {
   position: relative;
@@ -378,12 +388,16 @@ small span {
   margin: 28px 0 13px;
 }
 .add-podcast {
-  display: grid;
-  place-items: center;
-  width: 42px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  width: auto;
+  min-height: 42px;
   height: 42px;
+  padding: 0 15px;
   border: 1px solid #65577d;
-  border-radius: 50%;
+  border-radius: 24px;
   background: #3a3149;
   color: #dfd0ff;
   box-shadow: 0 3px 12px #09080b55;
@@ -633,6 +647,34 @@ small span {
   height: 100%;
   background: var(--accent);
 }
+footer {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  z-index: 3;
+  background: #1b191e;
+  padding-bottom: env(safe-area-inset-bottom);
+  border-top: 1px solid #39343d;
+}
+nav {
+  display: flex;
+  justify-content: center;
+  gap: 60px;
+  height: 60px;
+}
+nav button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  font-size: 14px;
+  color: var(--sub);
+  min-width: 105px;
+}
+nav button[aria-current] {
+  color: var(--accent);
+}
 .scrim {
   position: fixed;
   inset: 0;
@@ -817,9 +859,16 @@ small span {
     min-height: 215px;
     border-radius: 15px;
   }
+  .hero > .art {
+    right: 12px;
+    width: 112px;
+    height: 112px;
+    border-radius: 14px;
+  }
   .herocopy {
     padding: 22px 16px;
-    width: 70%;
+    width: 74%;
+    padding-right: 0;
   }
   .hero h2 {
     font-size: 25px;
@@ -827,9 +876,6 @@ small span {
   }
   .herometa {
     font-size: 12px;
-  }
-  .illustration {
-    left: 70%;
   }
   .tape {
     width: 155px;
