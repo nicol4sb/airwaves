@@ -137,7 +137,8 @@ export default function App() {
     [busy, setBusy] = useState(false);
   const [search, setSearch] = useState(""),
     [searchResults, setSearchResults] = useState<PodcastSearchResult[]>([]),
-    [searching, setSearching] = useState(false);
+    [searching, setSearching] = useState(false),
+    [addingPodcastURL, setAddingPodcastURL] = useState("");
   const [id, setEpisodeId] = useState(""),
     [playing, setPlaying] = useState(false),
     [pos, setPosition] = useState(0),
@@ -523,8 +524,8 @@ export default function App() {
     }
   }
   async function addPodcast(url: string) {
-    if (busy) return;
-    setBusy(true);
+    if (addingPodcastURL) return;
+    setAddingPodcastURL(url);
     try {
       await request("podcasts", "POST", { url });
       setModal("");
@@ -533,7 +534,7 @@ export default function App() {
     } catch (e) {
       report(e);
     } finally {
-      setBusy(false);
+      setAddingPodcastURL("");
     }
   }
   const show = (m: string) => {
@@ -565,7 +566,16 @@ export default function App() {
             : true),
   );
   const row = (e: Episode, index: number) => (
-    <article className="row" key={e.id}>
+    <article
+      className="row"
+      key={e.id}
+      onContextMenu={(event) => {
+        if (!saved.includes(e.id)) return;
+        event.preventDefault();
+        run(() => removeDownload(e));
+      }}
+      title={saved.includes(e.id) ? "Long press to delete download" : undefined}
+    >
       <button
         className="artplay"
         aria-label={"Play " + e.title}
@@ -749,6 +759,12 @@ export default function App() {
               <button
                 className="subscription"
                 key={p.id}
+                onContextMenu={(event) => {
+                  event.preventDefault();
+                  setPodcastId(p.id);
+                  setModal("remove");
+                }}
+                title="Long press to remove podcast"
                 onClick={() => {
                   setPodcastId(p.id);
                   setVisibleCount(15);
@@ -1006,9 +1022,9 @@ export default function App() {
                 {searchResults.length > 0 && (
                   <div className="podcast-results" aria-label="Search results">
                     {searchResults.map((result) => (
-                      <button key={result.url} type="button" disabled={busy} onClick={() => void addPodcast(result.url)}>
+                      <button key={result.url} type="button" disabled={!!addingPodcastURL} onClick={() => void addPodcast(result.url)}>
                         {result.image && <img src={result.image} alt="" />}
-                        <span><strong>{busy ? "Adding…" : result.title}</strong>{result.author && <small>{result.author}</small>}</span>
+                        <span><strong>{addingPodcastURL === result.url ? "Adding…" : result.title}</strong>{result.author && <small>{result.author}</small>}</span>
                       </button>
                     ))}
                   </div>
