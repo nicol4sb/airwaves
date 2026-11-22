@@ -3,7 +3,7 @@ import { mkdirSync, readFileSync, existsSync } from "node:fs";
 import { resolve, join } from "node:path";
 import { randomBytes, createHash, timingSafeEqual } from "node:crypto";
 import { database, ingest, library, transaction, progress } from "./db";
-import { DEFAULT_FEED } from "./rss";
+import { DEFAULT_FEED, hash } from "./rss";
 import { externalURL, fetchXML } from "./network";
 import { AudioCache } from "./cache";
 import { LocalSonos, MockSonos, type SonosAdapter } from "../sonos/adapter";
@@ -102,9 +102,21 @@ app.get("/api/search-podcasts", async (q, r) => {
 });
 app.post("/api/podcasts", async (q, r) => {
   const url = externalURL(q.body.url).href;
-  const id = ingest(db, await fetchXML(url), url);
-  r.json({ id });
-  void drain();
+  const id = hash(url);
+  const title = typeof q.body.title === "string" ? q.body.title.slice(0, 300) : "Loading podcast…";
+  const art = typeof q.body.art === "string" ? q.body.art : "";
+  db.prepare("INSERT INTO podcasts(id,url,title,art,error) VALUES(?,?,?,?, '') ON CONFLICT(id) DO NOTHING")
+    .run(id, url, title, art);
+  r.json({ id, podcast: db.prepare("SELECT * FROM podcasts WHERE id=?").get(id) });
+  void (async () => {
+    try {
+      ingest(db, await fetchXML(url), url);
+      await drain();
+    } catch (error) {
+      db.prepare("UPDATE podcasts SET error=? WHERE id=?").run(String(error), id);
+      console.warn("Podcast import:", String(error));
+    }
+  })();
 });
 app.delete("/api/podcasts/:id", (q, r) => {
   for (const e of db

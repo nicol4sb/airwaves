@@ -31,7 +31,7 @@ import {
   WifiOff,
   Trash2,
 } from "lucide-react";
-import type { Library, Episode, Speaker } from "../shared/types";
+import type { Library, Episode, Speaker, Podcast } from "../shared/types";
 import {
   automaticIds,
   download,
@@ -162,6 +162,7 @@ export default function App() {
     ignoreEpisodeClick = useRef(new Set<string>()),
     last = useRef(0),
     current = useRef({ id: "", pos: 0, playing: false }),
+    searchRequest = useRef(0),
     player = remote ?? phone;
   const episode = lib.episodes.find((e) => e.id === id),
     recent = [...lib.episodes]
@@ -494,6 +495,19 @@ export default function App() {
       updated,
     })));
   }
+  async function deletePodcast(podcastId: string) {
+    await request("podcasts/" + podcastId, "DELETE");
+    setLib((currentLib) => ({
+      ...currentLib,
+      podcasts: currentLib.podcasts.filter((p) => p.id !== podcastId),
+      episodes: currentLib.episodes.filter((e) => e.podcastId !== podcastId),
+      queue: currentLib.queue.filter((episodeId) =>
+        currentLib.episodes.some((e) => e.id === episodeId && e.podcastId !== podcastId),
+      ),
+    }));
+    setSwipedPodcast("");
+    void refresh();
+  }
   useEffect(() => {
     if (!online || !ready || !lib.episodes.length) return;
     let stop = false;
@@ -539,25 +553,48 @@ export default function App() {
       setBusy(false);
     }
   }
-  async function searchPodcasts(ev: FormEvent) {
-    ev.preventDefault();
-    setSearching(true);
-    try {
-      setSearchResults(await request<PodcastSearchResult[]>("search-podcasts?q=" + encodeURIComponent(search.trim())));
-    } catch (e) {
-      report(e);
-    } finally {
+  useEffect(() => {
+    const query = search.trim();
+    const requestId = ++searchRequest.current;
+    if (modal !== "add" || query.length < 2) {
+      setSearchResults([]);
       setSearching(false);
+      return;
     }
-  }
-  async function addPodcast(url: string) {
+    setSearching(true);
+    const timer = window.setTimeout(() => {
+      void request<PodcastSearchResult[]>("search-podcasts?q=" + encodeURIComponent(query))
+        .then((results) => {
+          if (searchRequest.current === requestId) setSearchResults(results);
+        })
+        .catch((error) => {
+          if (searchRequest.current === requestId) report(error);
+        })
+        .finally(() => {
+          if (searchRequest.current === requestId) setSearching(false);
+        });
+    }, 350);
+    return () => window.clearTimeout(timer);
+  }, [search, modal]);
+  async function addPodcast(result: PodcastSearchResult) {
     if (addingPodcastURL) return;
-    setAddingPodcastURL(url);
+    setAddingPodcastURL(result.url);
     try {
-      await request("podcasts", "POST", { url });
+      const added = await request<{ id: string; podcast: Podcast }>("podcasts", "POST", {
+        url: result.url,
+        title: result.title,
+        art: result.image,
+      });
+      setLib((currentLib) => currentLib.podcasts.some((p) => p.id === added.id)
+        ? currentLib
+        : { ...currentLib, podcasts: [...currentLib.podcasts, added.podcast].sort((a, b) => a.title.localeCompare(b.title)) });
+      const local = await localLibrary();
+      const libraryToStore = local ?? lib;
+      await put("library", libraryToStore.podcasts.some((p) => p.id === added.id)
+        ? libraryToStore
+        : { ...libraryToStore, podcasts: [...libraryToStore.podcasts, added.podcast] });
       setModal("");
-      msg("Podcast added");
-      await refresh();
+      void refresh();
     } catch (e) {
       report(e);
     } finally {
@@ -844,11 +881,7 @@ export default function App() {
                 </button>
                 {swipedPodcast === p.id && (
                   <div className="subscription-actions">
-                    <button onClick={() => {
-                      setPodcastId(p.id);
-                      setModal("remove");
-                      setSwipedPodcast("");
-                    }}><Trash2 size={17} /> Delete</button>
+                    <button onClick={() => run(() => deletePodcast(p.id))}><Trash2 size={17} /> Delete</button>
                     <button onClick={() => {
                       run(() => markPodcastRead(p.id));
                       setSwipedPodcast("");
@@ -1012,17 +1045,15 @@ export default function App() {
             )}
             {modal === "add" && (
               <>
-                <form onSubmit={searchPodcasts}>
-                  <label>
-                    Search podcasts
-                    <input autoFocus type="search" minLength={2} maxLength={100} placeholder="The Rest Is History" value={search} onChange={(e) => setSearch(e.target.value)} />
-                  </label>
-                  <button className="primary" disabled={searching || search.trim().length < 2}>{searching ? "Searching…" : "Search"}</button>
-                </form>
+                <label>
+                  Search podcasts
+                  <input autoFocus type="search" minLength={2} maxLength={100} placeholder="The Rest Is History" value={search} onChange={(e) => setSearch(e.target.value)} />
+                </label>
+                {searching && <p className="search-status" role="status">Searching…</p>}
                 {searchResults.length > 0 && (
                   <div className="podcast-results" aria-label="Search results">
                     {searchResults.map((result) => (
-                      <button key={result.url} type="button" disabled={!!addingPodcastURL} onClick={() => void addPodcast(result.url)}>
+                      <button key={result.url} type="button" disabled={!!addingPodcastURL} onClick={() => void addPodcast(result)}>
                         {result.image && <img src={result.image} alt="" />}
                         <span><strong>{addingPodcastURL === result.url ? "Adding…" : result.title}</strong>{result.author && <small>{result.author}</small>}</span>
                       </button>
