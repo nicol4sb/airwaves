@@ -51,7 +51,6 @@ Caddy owns ports 80 and 443. The internal CA and its keys persist in `caddy_data
 | REFRESH_MINUTES | 60 | Refresh and retry interval |
 | SONOS_MODE | local | Set to mock for development |
 | SONOS_HOSTS | empty | Optional comma-separated private IPv4 speaker addresses if multicast is filtered |
-| PODCAST_INDEX_API_KEY / PODCAST_INDEX_API_SECRET | empty | Optional Podcast Index credentials for podcast title search |
 
 Compose sets DATA_DIR to /data and AUDIO_DIR to /audio. If changing the production port, update Caddy and the app health check too. Foreground phone download settings are per browser installation.
 

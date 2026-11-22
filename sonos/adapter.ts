@@ -87,7 +87,7 @@ export class LocalSonos implements SonosAdapter {
 
   discover() {
     const age = Date.now() - this.scannedAt;
-    if (age < 30_000 && this.devices.size) {
+    if (age < 30_000 && this.scannedAt) {
       if (!this.scanning)
         this.scanning = this.scan().finally(() => {
           this.scanning = undefined;

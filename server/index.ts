@@ -80,37 +80,23 @@ app.get("/api/search-podcasts", async (q, r) => {
     r.status(400).json({ error: "Enter at least 2 characters to search" });
     return;
   }
-  const key = process.env.PODCAST_INDEX_API_KEY;
-  const secret = process.env.PODCAST_INDEX_API_SECRET;
-  if (!key || !secret) {
-    r.status(503).json({ error: "Podcast search is not configured on the server" });
-    return;
-  }
-  const timestamp = Math.floor(Date.now() / 1000).toString();
-  const auth = createHash("sha1")
-    .update(key + secret + timestamp)
-    .digest("hex");
-  const url = new URL("https://api.podcastindex.org/api/1.0/search/byterm");
-  url.searchParams.set("q", term);
-  url.searchParams.set("max", "12");
+  const url = new URL("https://itunes.apple.com/search");
+  url.searchParams.set("term", term);
+  url.searchParams.set("media", "podcast");
+  url.searchParams.set("limit", "12");
   const result = await fetch(url, {
-    headers: {
-      "User-Agent": "Airwave/1.0",
-      "X-Auth-Key": key,
-      "X-Auth-Date": timestamp,
-      "Authorization": auth,
-    },
+    headers: { "User-Agent": "Airwave/1.0" },
     signal: AbortSignal.timeout(10000),
   });
-  if (!result.ok) throw Error("Podcast Index search failed (" + result.status + ")");
-  const data = (await result.json()) as { feeds?: Array<Record<string, unknown>> };
-  r.json((data.feeds ?? []).flatMap((feed) => {
-    if (typeof feed.title !== "string" || typeof feed.url !== "string") return [];
+  if (!result.ok) throw Error("Podcast search failed (" + result.status + ")");
+  const data = (await result.json()) as { results?: Array<Record<string, unknown>> };
+  r.json((data.results ?? []).flatMap((feed) => {
+    if (typeof feed.collectionName !== "string" || typeof feed.feedUrl !== "string") return [];
     return [{
-      title: feed.title,
-      url: feed.url,
-      author: typeof feed.author === "string" ? feed.author : "",
-      image: typeof feed.image === "string" ? feed.image : "",
+      title: feed.collectionName,
+      url: feed.feedUrl,
+      author: typeof feed.artistName === "string" ? feed.artistName : "",
+      image: typeof feed.artworkUrl100 === "string" ? feed.artworkUrl100 : "",
     }];
   }));
 });
@@ -288,6 +274,11 @@ cache = new AudioCache(
 );
 for (const host of hosts)
   console.log(`Airwave listening at http://${host}:${port}`);
+const refreshSpeakers = () => {
+  void sonos.discover().catch((e) => console.warn("Sonos discovery:", String(e)));
+};
+refreshSpeakers();
+setInterval(refreshSpeakers, 60_000).unref();
 tick();
 setInterval(
   tick,
