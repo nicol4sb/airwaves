@@ -1,5 +1,6 @@
 import {
   useEffect,
+  useMemo,
   useRef,
   useState,
   type FormEvent,
@@ -8,16 +9,16 @@ import {
 import {
   AudioLines,
   Headphones,
-  ListMusic,
+  Search,
   Play,
   Pause,
   Download,
+  Volume1,
+  Volume2,
   Check,
   Plus,
   ChevronDown,
   ChevronRight,
-  ChevronUp,
-  SkipForward,
   Settings2,
   Cast,
   X,
@@ -29,6 +30,7 @@ import {
   Smartphone,
   ArrowLeft,
   WifiOff,
+  LoaderCircle,
   Trash2,
 } from "lucide-react";
 import type { Library, Episode, Speaker, Podcast } from "../shared/types";
@@ -46,8 +48,9 @@ import {
   sync,
 } from "./storage";
 import { audio, phone, Remote } from "./player";
+import { profileLabel } from "./profile";
 const empty: Library = { episodes: [], podcasts: [], queue: [] };
-type PodcastSearchResult = { title: string; url: string; author: string; image: string };
+type PodcastSearchResult = { id: string; title: string; url: string; author: string; image: string };
 const fmt = (n: number) =>
   Math.floor(n / 60) + ":" + String(Math.floor(n % 60)).padStart(2, "0");
 const minutes = (s: number) =>
@@ -96,6 +99,16 @@ function Art({ e }: { e: { art: string; title: string } }) {
     </span>
   );
 }
+function EpisodeImportStatus({ podcast, online }: { podcast: Podcast; online: boolean }) {
+  const loading = online && !podcast.error;
+  return (
+    <span className="episode-import" role="status">
+      {loading && <LoaderCircle size={15} aria-hidden="true" />}
+      {podcast.error ? "Couldn’t load episodes. Will retry on refresh."
+        : online ? "Loading episodes…" : "Waiting for a connection to update episodes."}
+    </span>
+  );
+}
 function Cassette({ name }: { name: string }) {
   return (
     <div className="illustration" aria-hidden="true">
@@ -129,6 +142,7 @@ export default function App() {
     [tab, setTab] = useState("Episodes"),
     [filter, setFilter] = useState("Unplayed"),
     [detail, setPodcastId] = useState(""),
+    [episodeQuery, setEpisodeQuery] = useState(""),
     [count, setVisibleCount] = useState(15);
   const [modal, setModal] = useState(""),
     [message, msg] = useState(""),
@@ -151,7 +165,8 @@ export default function App() {
     [scanning, setScanning] = useState(false),
     [speakerError, setSpeakerError] = useState(""),
     [remote, setRemote] = useState<Remote | null>(null),
-    [volume, setVolume] = useState(25);
+    [volume, setVolume] = useState<number>();
+  const volumeTarget = useRef<Remote | null>(null);
   const [foreground, setForeground] = useState(0);
   const [swipedPodcast, setSwipedPodcast] = useState("");
   const [swipedEpisode, setSwipedEpisode] = useState("");
@@ -166,6 +181,9 @@ export default function App() {
     current = useRef({ id: "", pos: 0, playing: false }),
     searchRequest = useRef(0),
     player = remote ?? phone;
+  const pickerOpen = modal === "devices";
+  const remoteUnavailable = !online || (pickerOpen && !!speakerError);
+  const deviceLabel = remote ? (remoteUnavailable ? "Playback device" : remote.speaker.name) : "This device";
   const episode = lib.episodes.find((e) => e.id === id),
     recent = [...lib.episodes]
       .filter((e) => e.position > 0 && !e.played)
@@ -222,6 +240,15 @@ export default function App() {
       window.removeEventListener("offline", lost);
     };
   }, []);
+  const importingPodcast = lib.podcasts.find((p) => p.importPending && !p.error);
+  const importingEpisodes = !!importingPodcast;
+  useEffect(() => {
+    if (!online || !importingEpisodes || addingPodcastURL) return;
+    const timer = window.setInterval(() => {
+      if (!document.hidden) run(refresh);
+    }, 2000);
+    return () => window.clearInterval(timer);
+  }, [online, importingEpisodes, addingPodcastURL]);
   useEffect(() => {
     if (!message) return;
     const t = setTimeout(() => msg(""), 6000);
@@ -238,23 +265,16 @@ export default function App() {
     }));
     await saveProgress(p);
   }
-  async function queue(ids: string[]) {
-    setLib((l) => ({ ...l, queue: ids }));
-    await put("queue", ids);
-    if (online) await refresh();
-  }
   async function start(e: Episode, position = e.played ? 0 : e.position) {
-    if (current.current.id && current.current.id !== e.id)
+    if (current.current.id && current.current.id !== e.id && (remote || !audio.ended))
       void storePosition(current.current.id, current.current.pos).catch(report);
     current.current = { id: e.id, pos: position, playing: false };
     setEpisodeId(e.id);
     setPosition(position);
     setPlaying(false);
-    await player.play(e, lib.queue, position);
+    await player.play(e, position);
     setPlaying(true);
     if (!remote) audio.playbackRate = speed;
-    if (lib.queue.includes(e.id))
-      await queue(lib.queue.filter((i) => i !== e.id));
   }
   async function toggle() {
     if (!episode && selected) return start(selected);
@@ -278,12 +298,8 @@ export default function App() {
     current.current.pos = value;
     await storePosition(id, value);
   }
-  async function next() {
-    const e = lib.episodes.find((e) => e.id === lib.queue[0]);
-    if (e) await start(e);
-  }
-  const handlers = useRef({ next, toggle, seek, storePosition });
-  handlers.current = { next, toggle, seek, storePosition };
+  const handlers = useRef({ toggle, seek, storePosition });
+  handlers.current = { toggle, seek, storePosition };
   current.current = { id, pos, playing };
   useEffect(() => {
     if (remote) return;
@@ -303,15 +319,8 @@ export default function App() {
         msg("This audio could not be played. Try downloading the episode.");
       };
     const end = () => {
-      run(async () => {
-        await handlers.current.storePosition(
-          current.current.id,
-          audio.currentTime,
-          true,
-        );
-        current.current.id = "";
-        await handlers.current.next();
-      });
+      setPlaying(false);
+      run(() => handlers.current.storePosition(current.current.id, audio.currentTime, true));
     };
     const hide = () => {
       if (document.hidden && current.current.id)
@@ -358,7 +367,6 @@ export default function App() {
       seekforward: () =>
         run(() => handlers.current.seek(audio.currentTime + 30)),
       seekto: (d) => run(() => handlers.current.seek(d.seekTime ?? 0)),
-      nexttrack: () => run(() => handlers.current.next()),
     };
     for (const [a, fn] of Object.entries(actions))
       try {
@@ -375,7 +383,7 @@ export default function App() {
     };
   }, [id, remote]);
   useEffect(() => {
-    if (!remote) return;
+    if (!remote || remoteUnavailable) return;
     let alive = true,
       running = false;
     const poll = async () => {
@@ -386,12 +394,11 @@ export default function App() {
         if (!alive) return;
         setPosition(s.position);
         setPlaying(s.playing);
-        setVolume(s.volume);
+        setVolume(remote.volumeLevel);
         const e = lib.episodes.find((e) => e.audio === s.audio);
         if (e) {
           if (current.current.id && current.current.id !== e.id) {
             await storePosition(current.current.id, current.current.pos, true);
-            await queue(lib.queue.filter((i) => i !== e.id));
           }
           setEpisodeId(e.id);
           await storePosition(e.id, s.position);
@@ -413,7 +420,7 @@ export default function App() {
       alive = false;
       clearInterval(t);
     };
-  }, [remote, lib.queue.join(",")]);
+  }, [remote, remoteUnavailable]);
   async function choose(s?: Speaker) {
     if (s && s.id === remote?.speaker.id) {
       setModal("");
@@ -421,60 +428,120 @@ export default function App() {
     }
     const target = s ? new Remote(s) : null;
     if (episode) {
-      const offset = remote
-        ? await remote
-            .status()
-            .then((s) => s.position)
-            .catch(() => pos)
-        : audio.currentTime;
+      let offset = audio.currentTime;
+      if (remote) {
+        offset = pos;
+        if (!remoteUnavailable)
+          offset = await remote.status().then((status) => status.position).catch(() => pos);
+      }
       if (target) {
-        await target.play(episode, lib.queue, offset);
+        await target.play(episode, offset);
         await player.pause();
       } else {
-        await player
-          .pause()
-          .catch(() => msg("Speaker unreachable. It may still be playing."));
-        await phone.play(episode, [], offset);
+        if (!remoteUnavailable)
+          await player.pause().catch(() => msg("Speaker unreachable. It may still be playing."));
+        await phone.play(episode, offset);
       }
       setPlaying(true);
     }
+    volumeTarget.current = target;
+    setVolume(undefined);
     setRemote(target);
     setModal("");
   }
-  const readingSpeakers = useRef<symbol | null>(null);
+  function changeVolume(target: Remote, value: number) {
+    const write = target.setVolume(value);
+    setVolume(target.volumeLevel);
+    void write.catch((error) => {
+      if (volumeTarget.current === target) {
+        setVolume(target.volumeLevel);
+        report(error);
+      }
+    });
+  }
+  useEffect(() => {
+    if (!remote || remoteUnavailable) return;
+    const press = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || !event.cancelable || remote.volumeLevel === undefined) return;
+      if (event.key !== "AudioVolumeUp" && event.key !== "AudioVolumeDown") return;
+      event.preventDefault();
+      changeVolume(remote, remote.volumeLevel + (event.key === "AudioVolumeUp" ? 5 : -5));
+    };
+    window.addEventListener("keydown", press);
+    return () => window.removeEventListener("keydown", press);
+  }, [remote, remoteUnavailable]);
+  const volumeControls = remote && !remoteUnavailable && volume !== undefined && (
+    <div className="speaker-volume" role="group" aria-label={remote.speaker.name + " volume"}>
+      <button aria-label="Lower speaker volume" disabled={volume === 0} onClick={() => changeVolume(remote, volume - 5)}><Volume1 /></button>
+      <input type="range" aria-label="Speaker volume" min="0" max="100" value={volume} onChange={(e) => changeVolume(remote, +e.target.value)} />
+      <output>{volume}%</output>
+      <button aria-label="Raise speaker volume" disabled={volume === 100} onClick={() => changeVolume(remote, volume + 5)}><Volume2 /></button>
+    </div>
+  );
+  const readingSpeakers = useRef<AbortController | null>(null);
   async function loadSpeakers(rescan = false) {
-    if (!rescan && readingSpeakers.current) return;
-    const read = Symbol();
-    readingSpeakers.current = read;
+    if (!navigator.onLine || (!rescan && readingSpeakers.current)) return;
+    readingSpeakers.current?.abort();
+    const controller = new AbortController();
+    readingSpeakers.current = controller;
+    const timeout = window.setTimeout(() => controller.abort(), 8000);
     setScanning(rescan);
-    setSpeakerError("");
     try {
-      const rooms = rescan
-        ? await request<Speaker[]>("speakers/scan", "POST")
-        : await request<Speaker[]>("speakers");
-      if (readingSpeakers.current === read) setSpeakers(rooms);
-    } catch (error) {
-      if (readingSpeakers.current === read)
-        setSpeakerError(error instanceof Error ? error.message : "Could not load Sonos speakers.");
+      const rooms = await request<Speaker[]>(
+        rescan ? "speakers/scan" : "speakers",
+        rescan ? "POST" : "GET",
+        undefined,
+        controller.signal,
+      );
+      if (readingSpeakers.current === controller) {
+        setSpeakers(rooms);
+        setSpeakerError("");
+      }
+    } catch {
+      if (readingSpeakers.current === controller) {
+        setSpeakers(undefined);
+        setSpeakerError("Couldn’t reach the server’s speaker list.");
+      }
     } finally {
-      if (readingSpeakers.current === read) {
+      window.clearTimeout(timeout);
+      if (readingSpeakers.current === controller) {
         readingSpeakers.current = null;
         setScanning(false);
       }
     }
   }
   useEffect(() => {
-    if (!online || !ready) return;
-    const prefetch = () => {
+    if (!pickerOpen) return;
+    const fetchList = () => {
       if (!document.hidden) void loadSpeakers();
     };
-    prefetch();
-    const timer = window.setInterval(prefetch, 60_000);
-    return () => window.clearInterval(timer);
-  }, [online, ready, foreground]);
+    const offline = () => {
+      readingSpeakers.current?.abort();
+      readingSpeakers.current = null;
+      setSpeakers(undefined);
+      setScanning(false);
+      setSpeakerError("Server offline.");
+    };
+    if (navigator.onLine) fetchList();
+    else offline();
+    window.addEventListener("offline", offline);
+    window.addEventListener("online", fetchList);
+    document.addEventListener("visibilitychange", fetchList);
+    const timer = window.setInterval(fetchList, 5000);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("offline", offline);
+      window.removeEventListener("online", fetchList);
+      document.removeEventListener("visibilitychange", fetchList);
+      readingSpeakers.current?.abort();
+      readingSpeakers.current = null;
+    };
+  }, [pickerOpen]);
   function devices() {
+    setSpeakers(undefined);
+    setScanning(false);
+    setSpeakerError(navigator.onLine ? "" : "Server offline.");
     setModal("devices");
-    void loadSpeakers();
   }
   async function save(e: Episode, manual = true) {
     if (running.current.has(e.id)) return;
@@ -526,9 +593,6 @@ export default function App() {
       ...lib,
       podcasts: lib.podcasts.filter((p) => p.id !== podcastId),
       episodes: lib.episodes.filter((e) => e.podcastId !== podcastId),
-      queue: lib.queue.filter((episodeId) =>
-        lib.episodes.some((e) => e.id === episodeId && e.podcastId !== podcastId),
-      ),
     };
     setLib(next);
     setPodcastId("");
@@ -619,9 +683,12 @@ export default function App() {
     let optimisticId = "";
     try {
       const normalizedURL = new URL(result.url).href;
-      const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(normalizedURL));
-      optimisticId = [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
-      const localPodcast: Podcast = { id: optimisticId, title: result.title, url: normalizedURL, art: result.image, error: "" };
+      if (lib.podcasts.some((p) => p.url === normalizedURL)) {
+        setModal("");
+        return;
+      }
+      optimisticId = result.id;
+      const localPodcast: Podcast = { id: optimisticId, title: result.title, url: normalizedURL, art: result.image, error: "", importPending: 1 };
       optimistic = { ...lib, podcasts: [...lib.podcasts.filter((p) => p.id !== optimisticId), localPodcast].sort((a, b) => a.title.localeCompare(b.title)) };
       setLib(optimistic);
       setModal("");
@@ -662,23 +729,17 @@ export default function App() {
   const tabs = [
     ["Episodes", AudioLines],
     ["Podcasts", PodcastIcon],
-    ["Queue", ListMusic],
   ] as const;
-  const eps = (
-    tab === "Queue"
-      ? lib.queue.map((i) => lib.episodes.find((e) => e.id === i)).filter((e): e is Episode => !!e)
-      : lib.episodes
-  ).filter(
-    (e) =>
-      (tab === "Queue" || (detail
-        ? e.podcastId === detail
-        : filter === "Unplayed"
-          ? !e.played
-          : filter === "Downloaded"
-            ? saved.includes(e.id)
-            : true)),
-  );
-  const row = (e: Episode, index: number) => (
+  const detailPodcast = lib.podcasts.find((p) => p.id === detail);
+  const titleQuery = episodeQuery.trim().toLocaleLowerCase();
+  const eps = useMemo(() => lib.episodes.filter((e) => {
+    if (detail) return e.podcastId === detail && e.title.toLocaleLowerCase().includes(titleQuery);
+    if (filter === "Downloaded") return saved.includes(e.id);
+    return filter !== "Unplayed" || !e.played;
+  }), [lib.episodes, detail, titleQuery, filter, saved]);
+  const emptyImport = detailPodcast?.importPending ? detailPodcast
+    : tab === "Episodes" && filter !== "Downloaded" && !eps.length ? importingPodcast : undefined;
+  const row = (e: Episode) => (
     <article
       className={"row " + (swipedEpisode === e.id ? "swiped" : "")}
       key={e.id}
@@ -743,77 +804,22 @@ export default function App() {
         </small>
       </div>
       <div className="actions">
-        {tab === "Queue" ? (
-          <>
-            <IconButton
-              label="Move up"
-              click={() => {
-                if (index) {
-                  const a = [...lib.queue];
-                  [a[index - 1], a[index]] = [a[index], a[index - 1]];
-                  run(() => queue(a));
-                }
-              }}
-            >
-              <ChevronUp />
-            </IconButton>
-            <IconButton
-              label="Move down"
-              click={() => {
-                if (index + 1 < lib.queue.length) {
-                  const a = [...lib.queue];
-                  [a[index + 1], a[index]] = [a[index], a[index + 1]];
-                  run(() => queue(a));
-                }
-              }}
-            >
-              <ChevronDown />
-            </IconButton>
-            <IconButton
-              label="Remove from queue"
-              click={() =>
-                run(() => queue(lib.queue.filter((i) => i !== e.id)))
-              }
-            >
-              <X />
-            </IconButton>
-          </>
-        ) : (
-          <>
-            <IconButton
-              label={
-                saved.includes(e.id) ? "Delete download" : "Download episode"
-              }
-              click={() =>
-                run(() => (saved.includes(e.id) ? removeDownload(e) : save(e)))
-              }
-            >
-              {percent[e.id] !== undefined ? (
-                <small>{percent[e.id]}%</small>
-              ) : saved.includes(e.id) ? (
-                <Check />
-              ) : (
-                <Download />
-              )}
-            </IconButton>
-            <IconButton
-              label={
-                lib.queue.includes(e.id) ? "Remove from queue" : "Add to queue"
-              }
-              click={() =>
-                run(() =>
-                  queue(
-                    lib.queue.includes(e.id)
-                      ? lib.queue.filter((i) => i !== e.id)
-                      : [...lib.queue, e.id],
-                  ),
-                )
-              }
-            >
-              {lib.queue.includes(e.id) ? <Check /> : <Plus />}
-            </IconButton>
-          </>
-        )}
+        <IconButton
+          label={
+            saved.includes(e.id) ? "Delete download" : "Download episode"
+          }
+          click={() =>
+            run(() => (saved.includes(e.id) ? removeDownload(e) : save(e)))
+          }
+        >
+          {percent[e.id] !== undefined ? (
+            <small>{percent[e.id]}%</small>
+          ) : saved.includes(e.id) ? (
+            <Check />
+          ) : (
+            <Download />
+          )}
+        </IconButton>
         {swipedEpisode === e.id && saved.includes(e.id) && (
           <button className="episode-delete" aria-label="Delete downloaded episode" onClick={() => {
             ignoreEpisodeClick.current.delete(e.id);
@@ -846,7 +852,7 @@ export default function App() {
           <div className="headtools">
             <button className="device" onClick={devices}>
               <Cast size={16} />
-              {remote?.speaker.name ?? "This device"}
+              {deviceLabel}
               <ChevronDown size={14} />
             </button>
             <IconButton label="Library settings" click={() => show("settings")}>
@@ -857,7 +863,7 @@ export default function App() {
       </header>
       <main>
         <div className="pagehead">
-          <div className="over"><span className="tinyline" /> YOUR LIBRARY</div>
+          <div className="over"><span className="tinyline" /> {profileLabel.toUpperCase()}’S LIBRARY</div>
           <h1>{detail ? lib.podcasts.find((p) => p.id === detail)?.title : tab}</h1>
         </div>
         {!online && (
@@ -897,6 +903,7 @@ export default function App() {
                   podcastGesture.current.set(p.id, { x: event.clientX, y: event.clientY });
                   const timer = window.setTimeout(() => {
                     ignorePodcastClick.current.add(p.id);
+                    setEpisodeQuery("");
                     setPodcastId(p.id);
                     setModal("remove");
                   }, 550);
@@ -937,6 +944,7 @@ export default function App() {
                   className="subscription"
                   onClick={() => {
                     if (ignorePodcastClick.current.delete(p.id)) return;
+                    setEpisodeQuery("");
                     setPodcastId(p.id);
                     setVisibleCount(15);
                   }}
@@ -945,8 +953,10 @@ export default function App() {
                   <div>
                     <b>{p.title}</b>
                     <small>
-                      {lib.episodes.filter((e) => e.podcastId === p.id && !e.played).length} new
-                      {p.error ? " · Refresh pending" : ""}
+                      {p.importPending ? <EpisodeImportStatus podcast={p} online={online} /> : <>
+                        {lib.episodes.filter((e) => e.podcastId === p.id && !e.played).length} new
+                        {p.error ? " · Refresh pending" : ""}
+                      </>}
                     </small>
                   </div>
                   {lib.episodes.some((e) => e.podcastId === p.id && !e.played) && <i className="unread-dot" aria-label="Unread episodes" />}
@@ -967,7 +977,7 @@ export default function App() {
         ) : (
           <>
             <div className="sectionhead">
-              <h2>{detail ? <button onClick={() => setPodcastId("")}><ArrowLeft size={18} /> Podcasts</button> : tab === "Queue" ? "Up next" : "Latest episodes"} <em>{eps.length}</em></h2>
+              <h2>{detail ? <button onClick={() => setPodcastId("")}><ArrowLeft size={18} /> Podcasts</button> : "Latest episodes"} {!emptyImport && <em>{eps.length}</em>}</h2>
               {detail && (
                 <button
                   className="secondary"
@@ -993,6 +1003,21 @@ export default function App() {
                 </div>
               )}
             </div>
+            {detail && (
+              <label className="episode-search">
+                <Search size={18} aria-hidden="true" />
+                <input
+                  type="search"
+                  aria-label="Search episodes in this podcast"
+                  placeholder="Search episodes by title"
+                  value={episodeQuery}
+                  onChange={(event) => {
+                    setEpisodeQuery(event.target.value);
+                    setVisibleCount(15);
+                  }}
+                />
+              </label>
+            )}
             <div className="listing">{eps.slice(0, count).map(row)}</div>
             {eps.length > count && (
               <button
@@ -1004,11 +1029,17 @@ export default function App() {
             )}
             {!eps.length && (
               <p className="empty">
-                {!ready
+                {emptyImport
+                  ? <EpisodeImportStatus podcast={emptyImport} online={online} />
+                  : !ready && !lib.podcasts.length
                   ? "Loading library…"
-                  : filter === "Downloaded"
+                  : detail && titleQuery
+                    ? "No matching episode titles."
+                    : !detail && filter === "Downloaded"
                       ? "Downloaded episodes will appear here."
-                      : "No episodes here yet."}
+                      : ready && !lib.podcasts.length && online
+                        ? <button className="secondary" onClick={() => show("add")}><Plus size={16} /> Add your first podcast</button>
+                        : "No episodes here yet."}
               </p>
             )}
           </>
@@ -1029,7 +1060,6 @@ export default function App() {
               <div className="actions">
                 <IconButton label="Playback device" click={devices}><Cast /></IconButton>
                 <button className="round big" aria-label="Play or pause" onClick={() => run(toggle)}>{playing ? <Pause /> : <Play />}</button>
-                <IconButton label="Next queued episode" click={() => lib.queue.length ? run(next) : msg("Queue is empty")}><SkipForward /></IconButton>
               </div>
             </div>
             <div className="track"><i style={{ width: Math.min(100, (pos / (selected.duration || 1)) * 100) + "%" }} /></div>
@@ -1144,9 +1174,10 @@ export default function App() {
                   )}
                   <button onClick={devices}>
                     <Cast size={16} />
-                    {remote?.speaker.name ?? "This device"}
+                    {deviceLabel}
                   </button>
                 </div>
+                {volumeControls}
                 <p>{selected.description}</p>
               </div>
             )}
@@ -1238,29 +1269,15 @@ export default function App() {
                     {remote?.speaker.id === s.id && <Check />}
                   </button>
                 ))}
-                {remote && (
-                  <label>
-                    Speaker volume
-                    <input
-                      type="range"
-                      min="0"
-                      max="100"
-                      value={volume}
-                      onChange={(e) => {
-                        setVolume(+e.target.value);
-                        run(() => remote.volume(+e.target.value));
-                      }}
-                    />
-                  </label>
-                )}
-                <button
+                {remote && speakers?.some((s) => s.id === remote.speaker.id) && volumeControls}
+                {speakers && <button
                   className="secondary"
                   disabled={scanning}
                   onClick={() => void loadSpeakers(true)}
                 >
                   <RefreshCw size={16} />
                   {scanning ? "Scanning…" : "Scan for speakers"}
-                </button>
+                </button>}
                 {speakerError && <p role="alert">{speakerError}</p>}
                 {!speakerError && !speakers && !scanning && <p>Loading speakers…</p>}
                 {!speakerError && !scanning && speakers?.length === 0 && (

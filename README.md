@@ -1,6 +1,8 @@
 # Airwave
 
-A single-user podcast PWA for a Raspberry Pi and an iPhone. Open Episodes to play 99% Invisible, use Podcasts → Add podcast to subscribe with an RSS URL, and use the device selector at the top right to discover Sonos rooms.
+Airwave is a podcast PWA for the home network. Open `/nic` for Nic’s existing library or `/emma` for Emma’s separate library, which starts empty. The original `/` address still opens Nic’s library. Anyone on the LAN with access to the app can use either profile. Open **Podcasts → Add podcast** to subscribe.
+
+Each profile has its own subscriptions, listening progress, audio downloads and device settings. Both can use the same Sonos rooms. To install a profile on a phone, open that profile’s URL before choosing **Add to Home Screen**.
 
 ## Local development on macOS
 
@@ -24,7 +26,7 @@ Stop the development server before running the production bundle on http://local
 
 ### Quick phone check on home Wi-Fi
 
-Build once with `npm run build`. In the project’s `.env`, set `LAN_HOST` to this computer’s private IPv4 address and `APP_PASSWORD` to a unique password of at least 12 characters. Restart with `npm run dev` or `npm start`. On the same trusted Wi-Fi, open `http://<LAN_HOST>:4173` in Safari without signing in. Port 4173 serves the built frontend and API together. Rebuild after frontend edits. Port 5173 remains available on the computer for hot reload. HTTP is for a local connectivity trial. Use the HTTPS setup below for installation and offline use.
+Build once with `npm run build`. In the project’s `.env`, set `LAN_HOST` to this computer’s private IPv4 address and leave `APP_PASSWORD` blank. Restart with `npm run dev` or `npm start`. On the same trusted Wi-Fi, open `http://<LAN_HOST>:4173` in Safari without signing in. Port 4173 serves the built frontend and API together. Rebuild after frontend edits. Port 5173 remains available on the computer for hot reload. HTTP is for a local connectivity trial. Use the HTTPS setup below for installation and offline use.
 
 ## Raspberry Pi installation
 
@@ -33,7 +35,7 @@ Build once with `npm run build`. In the project’s `.env`, set `LAN_HOST` to th
 3. Copy the repository to the Pi. Run `cp .env.example .env`, set `APP_HOST` to the DNS name and leave `APP_PASSWORD` blank if you want password-free access on your private network. Use `chmod 600 .env`.
 4. Run `docker compose up -d --build`, followed by `docker compose ps` and `docker compose logs --tail=80 app caddy`. The Node and Caddy base images have ARM64 variants. Both services use Linux host networking. Only Caddy serves the LAN. Express binds to loopback. Keep router port forwarding disabled for this deployment.
 5. Export the **public root certificate** with `docker compose cp caddy:/data/caddy/pki/authorities/local/root.crt ./airwave-root.crt`. Transfer it to your iPhone over a trusted channel such as AirDrop. Install the downloaded profile in Settings → General → VPN & Device Management, then enable trust in Settings → General → About → Certificate Trust Settings. Keep the CA private key on the server.
-6. Open `https://airwave.home.arpa` in Safari, sign in, then choose Share → Add to Home Screen. Open the installed app online once and download an episode there. Keep using the same scheme, host and port. A different origin gets a different library on the phone.
+6. Open `https://airwave.home.arpa/nic` or `https://airwave.home.arpa/emma` in Safari and choose Share → Add to Home Screen. Open the installed app online once and download an episode there. Keep using the same scheme, host and port. A different origin gets a different library on the phone.
 
 Caddy owns ports 80 and 443. The internal CA and its keys persist in `caddy_data`. The `library` and `audio` volumes hold SQLite and downloaded files. For an external disk, mount it at boot and replace `audio:/audio` with a bind mount, for example `/srv/airwave/audio:/audio`. Grant UID 1000 write access to that directory. Stop the app before filesystem-level backups of the SQLite directory. Preserve all volumes across upgrades. Rebuild with `docker compose up -d --build`.
 
@@ -41,26 +43,26 @@ Caddy owns ports 80 and 443. The internal CA and its keys persist in `caddy_data
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| APP_PASSWORD | empty | Set to enable single-user password authentication |
+| APP_PASSWORD | empty | Optional shared password for the whole app. Leave blank for password-free access |
 | APP_HOST | airwave.home.arpa | Caddy’s stable HTTPS name |
 | DATA_DIR / AUDIO_DIR | data / data/audio | SQLite directory and cache directory outside Compose |
 | PORT | 4173 | Loopback API and bundled UI port |
-| CACHE_MB | 2048 | Maximum retained audio size in MiB |
+| CACHE_MB | 2048 | Maximum retained audio size per profile in MiB |
 | RETENTION_DAYS | 30 | Evict eligible older downloads |
 | INITIAL_DOWNLOADS | 1 | Number cached when first subscribing |
 | REFRESH_MINUTES | 60 | Refresh and retry interval |
 | SONOS_MODE | local | Set to mock for development |
 | SONOS_HOSTS | empty | Optional comma-separated private IPv4 speaker addresses if multicast is filtered |
 
-Compose sets DATA_DIR to /data and AUDIO_DIR to /audio. If changing the production port, update Caddy and the app health check too. Foreground phone download settings are per browser installation.
+Compose sets DATA_DIR to /data and AUDIO_DIR to /audio. If changing the production port, update Caddy and the app health check too. Nic uses the original SQLite file and audio directory. Emma’s files live under `profiles/emma/` within each directory. Phone download settings are per profile and per installation.
 
 ## Playback and offline use
 
-- Play an episode or resume from the featured card. Tap the mini-player title for seek, skip and speed controls. Unplayed includes partly heard episodes until completion.
+- Play an episode or resume from the featured card. Tap the mini-player title for seek, skip and speed controls. Unplayed includes partly heard episodes until completion. Open a podcast and type in **Search episodes by title** to filter all its titles saved on this device. Episode search works offline once the library has synced, including titles whose audio you haven’t downloaded.
 - The down-arrow saves audio to the current browser. A check mark confirms completion and can be tapped to delete the download. Library settings control automatic downloads of the latest unplayed episodes per podcast. Automatic cleanup preserves unfinished and manually downloaded episodes. Manual deletion suppresses subsequent automatic download of that episode.
-- The installed app caches its shell, bundled art, metadata and downloaded audio. New remote artwork may be unavailable offline. IndexedDB stores local progress and queue changes until synchronization succeeds. Storage eviction and clearing website data can remove downloads. Check Downloaded before going offline. Leave the app open until the download finishes. A closed iOS PWA is not a reliable background downloader.
+- The installed app caches its shell, bundled art, metadata and downloaded audio. New remote artwork may be unavailable offline. IndexedDB stores listening progress until synchronization succeeds. Storage eviction and clearing website data can remove downloads. Check Downloaded before going offline. Leave the app open until the download finishes. A closed iOS PWA is not a reliable background downloader.
 - The Pi downloads new episodes serially, retries failures during refresh, writes partial files separately and supports authenticated HTTP byte ranges. The server can evict older eligible files to make space, while preserving partially heard episodes. Allow space for one temporary download in addition to the retained cache.
-- The Pi discovers Sonos rooms at startup and every minute using SSDP and Bonjour on each private IPv4 interface. The app loads the latest room list in advance. In the device selector, **Scan for speakers** waits for fresh discovery results. Each scan verifies the advertised devices and previously seen addresses against their Sonos UPnP descriptors, then lists reachable rooms by name. Select a room while listening to transfer playback. The adapter resolves its coordinator and adds the episode plus the current upcoming queue directly to the speaker. It appends to the existing device queue and selects the first newly added track. Future app queue edits apply to the next transfer. Sonos contacts the original enclosure URL, including publisher redirects. Playback speed is a phone feature.
+- The Pi discovers Sonos rooms at startup and every minute using SSDP and Bonjour on each private IPv4 interface. Opening the device selector fetches the list from the Pi. If the Pi is unreachable, only this device is available. In the device selector, **Scan for speakers** waits for fresh discovery results. Each scan verifies the advertised devices and previously seen addresses against their Sonos UPnP descriptors, then lists reachable rooms by name. Select a room while listening to transfer playback. The adapter resolves the room’s coordinator and starts the selected episode at your current position. Sonos contacts the original enclosure URL, including publisher redirects. In Now Playing or the device selector, use the speaker volume buttons or slider to adjust the selected room. Supported keyboard volume keys change the room in steps of five percentage points while the app is in the foreground. The iPhone’s side buttons control the system audio output. Playback speed is a phone feature.
 - Keep the Sonos speaker, router, DNS and internet connection powered for publisher streaming. Transfer back while the Pi is reachable. S1 firmware support for publisher TLS, redirects, audio encoding and seeking varies. Discovery alone does not verify a particular enclosure will play. Configure SONOS_HOSTS as a discovery fallback and check LAN multicast, wireless client isolation and VLAN routing if a speaker is missing.
 
 ## Architecture and security
@@ -76,8 +78,8 @@ When APP_PASSWORD is configured, Airwave uses an HttpOnly, Secure, SameSite sess
 1. On the iPhone 12 over trusted HTTPS, install Airwave. Play the latest 99% Invisible episode, pause, seek, change speed, lock the screen and try lock-screen controls. Reopen the PWA and check the saved position.
 2. Download an episode and wait for its check mark. Put the phone in airplane mode, close and reopen the installed app, then play and seek within the downloaded episode. Reconnect and check progress synchronization.
 3. Subscribe to a second public podcast RSS URL. Verify its artwork and episodes, refresh, then remove it. Verify removal survives a server restart.
-4. Put two episodes in Queue, reorder them and start the first. Select the CONNECT:AMP room. Verify sound, position, pause/resume, volume and transfer back. Repeat with a grouped room and then the One SL on its separate system. Check that neither system’s groups change.
-5. Transfer the two-episode queue again. Take the phone offline and stop the Pi while leaving the LAN and internet up. Verify that the speaker finishes the first track and starts the next on its own. Restart the Pi, select the room and verify status and transfer back.
+4. Start an episode from a podcast’s search results. Select the CONNECT:AMP room. Verify sound, position, pause/resume, volume and transfer back. Repeat with a grouped room and then the One SL on its separate system. Check that neither system’s groups change.
+5. Transfer an episode again. Take the phone offline and stop the Pi while leaving the LAN and internet up. Verify that the speaker keeps playing and that you can still search the podcast on the phone. Restart the Pi, select the room and verify status and transfer back.
 6. Interrupt a download and disconnect a speaker during control. Verify a visible error, retry once reachable, and check there are no partial episodes listed as available.
 
-Vitest covers real feed parsing, deduplication, subscription removal, progress ordering, IndexedDB outbox recovery, download failures/retries, SOAP escaping, coordinator routing and fault handling. Hardware discovery, speaker decoding, device-side queue advancement and iOS background or offline playback require the device checks above.
+Vitest covers real feed parsing, deduplication, subscription removal, progress ordering, IndexedDB outbox recovery, download failures/retries, SOAP escaping, coordinator routing and fault handling. Hardware discovery, speaker decoding and iOS background or offline playback require the device checks above.

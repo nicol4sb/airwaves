@@ -4,7 +4,7 @@ services:
     restart: unless-stopped
     network_mode: host
     environment:
-      APP_PASSWORD: ${APP_PASSWORD:?Set APP_PASSWORD in .env}
+      APP_PASSWORD: ${APP_PASSWORD:-}
       CACHE_MB: ${CACHE_MB:-2048}
       RETENTION_DAYS: ${RETENTION_DAYS:-30}
       INITIAL_DOWNLOADS: ${INITIAL_DOWNLOADS:-1}

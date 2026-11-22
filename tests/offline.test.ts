@@ -2,7 +2,7 @@ import "fake-indexeddb/auto";
 import { it, expect, vi } from "vitest";
 import { put, saveProgress, sync, localLibrary } from "../client/storage";
 import type { Library } from "../shared/types";
-it("retains local queue and progress during outage and replays them on reconnect", async () => {
+it("retains offline progress and syncs it without replaying an old queue", async () => {
   const lib = {
     podcasts: [],
     queue: [],
@@ -19,11 +19,12 @@ it("retains local queue and progress during outage and replays them on reconnect
     fetcher.mockImplementation(async (url, opts) => {
       if (url.endsWith("/progress/a"))
         Object.assign(lib.episodes[0], JSON.parse(opts.body));
-      if (url.endsWith("/queue")) lib.queue = JSON.parse(opts.body).ids;
       return Response.json(url.endsWith("/library") ? lib : { ok: true });
     });
     const fresh = await sync();
-    expect(fresh.queue).toEqual(["a"]);
+    expect(fetcher.mock.calls.map(([url]) => url)).toEqual([
+      "/api/profiles/nic/progress/a", "/api/profiles/nic/progress/a", "/api/profiles/nic/library",
+    ]);
     expect(fresh.episodes[0].position).toBe(42);
   } finally {
     vi.unstubAllGlobals();

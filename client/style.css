@@ -442,6 +442,35 @@ small span {
   background: #3b3446;
   color: #e3d3ff;
 }
+.speaker-volume {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.speaker-volume button { min-width: 44px; min-height: 44px; }
+.speaker-volume input { flex: 1; min-width: 0; }
+.speaker-volume output { min-width: 4ch; font-variant-numeric: tabular-nums; }
+.episode-search {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+  padding: 0 14px;
+  color: var(--sub);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+.episode-search:focus-within { border-color: var(--accent); }
+.episode-search input {
+  flex: 1;
+  min-width: 0;
+  min-height: 44px;
+  font: inherit;
+  color: var(--text);
+  border: 0;
+  background: transparent;
+}
 .row {
   gap: 16px;
   border-top: 1px solid var(--line);
@@ -596,6 +625,21 @@ small span {
 }
 .subscription small {
   margin-top: 4px;
+}
+.episode-import {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.episode-import svg {
+  color: var(--accent);
+  animation: episode-import-spin 1s linear infinite;
+}
+@keyframes episode-import-spin {
+  to { transform: rotate(360deg); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .episode-import svg { animation: none; }
 }
 .more {
   margin-top: 20px;

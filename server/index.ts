@@ -1,11 +1,11 @@
 import express from "express";
-import { mkdirSync, readFileSync, existsSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { resolve, join } from "node:path";
 import { randomBytes, createHash, timingSafeEqual } from "node:crypto";
-import { database, ingest, library, transaction, progress } from "./db";
-import { DEFAULT_FEED, hash } from "./rss";
-import { externalURL, fetchXML } from "./network";
-import { AudioCache } from "./cache";
+import { openProfile } from "./profile";
+import { externalURL } from "./network";
+import { hash } from "./rss";
+import { profileNames } from "../shared/profiles";
 import { LocalSonos, MockSonos, type SonosAdapter } from "../sonos/adapter";
 if (process.env.NODE_ENV !== "production") {
   try {
@@ -14,14 +14,6 @@ if (process.env.NODE_ENV !== "production") {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
 }
-const dir = resolve(process.env.DATA_DIR ?? "data");
-mkdirSync(dir, { recursive: true });
-const db = database(join(dir, "library.sqlite"));
-if (!db.prepare("SELECT 1 FROM settings WHERE key='seed'").get()) {
-  ingest(db, readFileSync("server/starter.xml", "utf8"), DEFAULT_FEED);
-  db.prepare("INSERT INTO settings VALUES('seed','1')").run();
-}
-let cache: AudioCache;
 const sonos: SonosAdapter =
   process.env.SONOS_MODE === "mock" ? new MockSonos() : new LocalSonos();
 const app = express();
@@ -34,7 +26,7 @@ const cooldown = new Map<string, number[]>();
 app.disable("x-powered-by");
 app.use(express.json({ limit: "64kb" }));
 app.get("/health", (_q, r) => {
-  db.prepare("SELECT 1").get();
+  for (const profile of libraries) profile.db.prepare("SELECT 1").get();
   r.json({ ok: true });
 });
 app.use("/api", (q, r, next) => {
@@ -78,8 +70,8 @@ app.use("/api", (q, r, next) => {
   }
   next();
 });
-app.get("/api/library", (_q, r) => r.json(library(db)));
-app.get("/api/search-podcasts", async (q, r) => {
+const sharedApi = express.Router();
+sharedApi.get("/search-podcasts", async (q, r) => {
   const term = String(q.query.q ?? "").trim();
   if (term.length < 2 || term.length > 100) {
     r.status(400).json({ error: "Enter at least 2 characters to search" });
@@ -97,173 +89,29 @@ app.get("/api/search-podcasts", async (q, r) => {
   const data = (await result.json()) as { results?: Array<Record<string, unknown>> };
   r.json((data.results ?? []).flatMap((feed) => {
     if (typeof feed.collectionName !== "string" || typeof feed.feedUrl !== "string") return [];
+    let url: string;
+    try {
+      url = externalURL(feed.feedUrl).href;
+    } catch {
+      return [];
+    }
     return [{
+      id: hash(url),
       title: feed.collectionName,
-      url: feed.feedUrl,
+      url,
       author: typeof feed.artistName === "string" ? feed.artistName : "",
       image: typeof feed.artworkUrl100 === "string" ? feed.artworkUrl100 : "",
     }];
   }));
 });
-app.post("/api/podcasts", async (q, r) => {
-  const url = externalURL(q.body.url).href;
-  const id = hash(url);
-  const title = typeof q.body.title === "string" ? q.body.title.slice(0, 300) : "Loading podcast…";
-  const art = typeof q.body.art === "string" ? q.body.art : "";
-  db.prepare("INSERT INTO podcasts(id,url,title,art,error) VALUES(?,?,?,?, '') ON CONFLICT(id) DO NOTHING")
-    .run(id, url, title, art);
-  r.json({ id, podcast: db.prepare("SELECT * FROM podcasts WHERE id=?").get(id) });
-  void (async () => {
-    try {
-      ingest(db, await fetchXML(url), url);
-      await drain();
-    } catch (error) {
-      db.prepare("UPDATE podcasts SET error=? WHERE id=?").run(String(error), id);
-      console.warn("Podcast import:", String(error));
-    }
-  })();
-});
-app.delete("/api/podcasts/:id", (q, r) => {
-  for (const e of db
-    .prepare("SELECT id FROM episodes WHERE podcastId=?")
-    .all(q.params.id))
-    cache.remove(String(e.id));
-  db.prepare("DELETE FROM podcasts WHERE id=?").run(q.params.id);
-  r.json({ ok: true });
-});
-app.put("/api/progress/:id", (q, r) => {
-  const { position, played, updated } = q.body;
-  if (
-    !Number.isFinite(position) ||
-    position < 0 ||
-    typeof played !== "boolean" ||
-    !Number.isSafeInteger(updated) ||
-    updated > Date.now() + 300000
-  )
-    throw Error("Invalid playback progress");
-  progress(db, q.params.id, position, played, updated);
-  r.json({ ok: true });
-});
-app.put("/api/queue", (q, r) => {
-  const ids = q.body.ids;
-  if (
-    !Array.isArray(ids) ||
-    ids.length > 500 ||
-    ids.some((id) => typeof id !== "string") ||
-    new Set(ids).size !== ids.length
-  )
-    throw Error("Invalid queue");
-  transaction(db, () => {
-    db.exec("DELETE FROM queue");
-    ids.forEach((id, i) =>
-      db
-        .prepare("INSERT INTO queue SELECT id,? FROM episodes WHERE id=?")
-        .run(i, id),
-    );
-  });
-  r.json({ ok: true });
-});
-app.get("/api/audio/:id", async (q, r) => {
-  const id = q.params.id;
-  await cache.ensure(id);
-  const mime = String(
-    db.prepare("SELECT mime FROM episodes WHERE id=?").get(id)?.mime,
-  );
-  r.type(mime.startsWith("audio/") ? mime : "audio/mpeg").sendFile(
-    cache.path(id),
-    { cacheControl: false },
-  );
-});
-app.get("/api/speakers", async (_q, r) => {
+sharedApi.get("/speakers", async (_q, r) => {
   r.json(sonos.cached() ?? await sonos.discover());
 });
-app.post("/api/speakers/scan", async (_q, r) => r.json(await sonos.discover()));
-app.get("/api/speakers/:id", async (q, r) =>
+sharedApi.post("/speakers/scan", async (_q, r) => r.json(await sonos.discover()));
+sharedApi.get("/speakers/:id", async (q, r) =>
   r.json(await sonos.status(q.params.id)),
 );
-app.post("/api/speakers/:id", async (q, r) => {
-  const { action, value = 0, ids } = q.body;
-  if (!Number.isFinite(value) || value < 0)
-    throw Error("Invalid position or volume");
-  if (action === "start") {
-    if (!Array.isArray(ids) || !ids.length || ids.length > 500)
-      throw Error("Invalid tracks");
-    const tracks = ids.map((id) => {
-      const row = db.prepare("SELECT audio FROM episodes WHERE id=?").get(id);
-      if (!row) throw Error("Unknown episode");
-      return String(row.audio);
-    });
-    await sonos.start(q.params.id, tracks, value);
-  } else if (
-    ["pause", "resume", "seek", "volume"].includes(action) &&
-    !(action === "volume" && value > 100)
-  )
-    await sonos.control(q.params.id, action, value);
-  else throw Error("Invalid command");
-  r.json({ ok: true });
-});
-if (existsSync("dist/index.html")) app.use(express.static("dist"));
-app.use(
-  (
-    error: Error,
-    _q: express.Request,
-    r: express.Response,
-    next: express.NextFunction,
-  ) => {
-    if (r.headersSent) {
-      next(error);
-      return;
-    }
-    r.status(400).json({ error: error.message });
-  },
-);
-let draining = false;
-async function drain() {
-  if (draining) return;
-  draining = true;
-  try {
-    for (const row of db
-      .prepare(
-        "SELECT id FROM episodes WHERE cached='pending' ORDER BY date DESC",
-      )
-      .all()) {
-      try {
-        await cache.ensure(String(row.id));
-      } catch (e) {
-        console.warn("Audio download:", String(e));
-      }
-    }
-  } finally {
-    draining = false;
-  }
-}
-let refreshing = false;
-async function refresh() {
-  if (refreshing) return;
-  refreshing = true;
-  try {
-    for (const p of db.prepare("SELECT id,url FROM podcasts").all()) {
-      try {
-        const xml = await fetchXML(String(p.url));
-        if (db.prepare("SELECT 1 FROM podcasts WHERE id=?").get(p.id))
-          ingest(db, xml, String(p.url));
-      } catch (e) {
-        db.prepare("UPDATE podcasts SET error=? WHERE id=?").run(
-          String(e),
-          p.id,
-        );
-      }
-    }
-    db.exec("UPDATE episodes SET cached='pending' WHERE cached='failed'");
-    cache.prune();
-    await drain();
-  } finally {
-    refreshing = false;
-  }
-}
-const tick = () => {
-  void refresh().catch((e) => console.warn("Refresh:", String(e)));
-};
+const libraries: ReturnType<typeof openProfile>[] = [];
 const port = Number(process.env.PORT ?? 4173);
 const hosts = [...new Set(["127.0.0.1", ...(lanHost ? [lanHost] : [])])];
 function listen(host: string): Promise<void> {
@@ -287,10 +135,40 @@ try {
   console.error(error instanceof Error ? error.message : error);
   process.exit(1);
 }
-// Cache recovery must run only after this process has acquired its listeners.
-cache = new AudioCache(
-  db,
-  resolve(process.env.AUDIO_DIR ?? join(dir, "audio")),
+// Open the databases and recover cached files only after acquiring the listeners.
+const dataDir = resolve(process.env.DATA_DIR ?? "data");
+const audioDir = resolve(process.env.AUDIO_DIR ?? join(dataDir, "audio"));
+for (const name of profileNames) {
+  const isNic = name === "nic";
+  const profile = openProfile(
+    isNic ? dataDir : join(dataDir, "profiles", name),
+    isNic ? audioDir : join(audioDir, "profiles", name),
+    isNic,
+    sonos,
+  );
+  libraries.push(profile);
+  const routes = ["/api/profiles/" + name];
+  if (isNic) routes.push("/api");
+  app.use(routes, sharedApi, profile.router);
+}
+
+if (existsSync("dist/index.html")) {
+  app.get(profileNames.map((name) => "/" + name), (_q, r) => r.sendFile(resolve("dist/index.html")));
+  app.use(express.static("dist"));
+}
+app.use(
+  (
+    error: Error,
+    _q: express.Request,
+    r: express.Response,
+    next: express.NextFunction,
+  ) => {
+    if (r.headersSent) {
+      next(error);
+      return;
+    }
+    r.status(400).json({ error: error.message });
+  },
 );
 for (const host of hosts)
   console.log(`Airwave listening at http://${host}:${port}`);
@@ -299,6 +177,10 @@ const refreshSpeakers = () => {
 };
 refreshSpeakers();
 setInterval(refreshSpeakers, 60_000).unref();
+const tick = () => {
+  for (const profile of libraries)
+    void profile.refresh().catch((error) => console.warn("Refresh:", String(error)));
+};
 tick();
 setInterval(
   tick,

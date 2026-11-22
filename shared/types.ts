@@ -4,6 +4,7 @@ export interface Podcast {
   url: string;
   art: string;
   error: string;
+  importPending?: number;
 }
 export interface Episode {
   id: string;

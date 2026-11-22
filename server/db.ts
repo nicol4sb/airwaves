@@ -9,6 +9,8 @@ export function database(path: string) {
  CREATE INDEX IF NOT EXISTS dates ON episodes(date DESC);
  CREATE TABLE IF NOT EXISTS queue(id TEXT PRIMARY KEY REFERENCES episodes ON DELETE CASCADE,rank INTEGER);
  CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT);`);
+  if (!db.prepare("PRAGMA table_info(podcasts)").all().some((column) => column.name === "importPending"))
+    db.exec("ALTER TABLE podcasts ADD COLUMN importPending INTEGER NOT NULL DEFAULT 0");
   return db;
 }
 export type DB = ReturnType<typeof database>;
@@ -26,7 +28,7 @@ export function ingest(db: DB, xml: string, url: string) {
   const { podcast: p, episodes } = parseFeed(xml, url);
   transaction(db, () => {
     db.prepare(
-      "INSERT INTO podcasts VALUES(?,?,?,?, '') ON CONFLICT(id) DO UPDATE SET title=excluded.title,art=excluded.art,error=''",
+      "INSERT INTO podcasts(id,url,title,art) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET title=excluded.title,art=excluded.art,error='',importPending=0",
     ).run(p.id, p.url, p.title, p.art);
     const old = db
       .prepare("SELECT MAX(date) AS newest FROM episodes WHERE podcastId=?")

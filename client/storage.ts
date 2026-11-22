@@ -1,6 +1,8 @@
 import { openDB } from "idb";
 import type { Library, Episode } from "../shared/types";
-const db = openDB("airwave", 1, {
+import { apiPath, profile } from "./profile";
+// Nic keeps the original store, including downloads and unsynced progress.
+const db = openDB(profile === "nic" ? "airwave" : "airwave-" + profile, 1, {
   upgrade(db) {
     for (const key of ["meta", "audio", "progress"]) db.createObjectStore(key);
   },
@@ -15,9 +17,12 @@ export async function request<T>(
   path: string,
   method = "GET",
   body?: unknown,
+  signal?: AbortSignal,
 ): Promise<T> {
-  const res = await fetch("/api/" + path, {
+  const res = await fetch(apiPath(path), {
     method,
+    signal,
+    cache: "no-store",
     headers: { "Content-Type": "application/json", "X-Airwave": "1" },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
@@ -54,10 +59,7 @@ export async function localLibrary() {
   const d = await db;
   const lib = await get<Library>("library");
   if (!lib) return;
-  return {
-    ...mergeProgress(lib, await d.getAll("progress")),
-    queue: (await get<string[]>("queue")) ?? lib.queue,
-  };
+  return mergeProgress(lib, await d.getAll("progress"));
 }
 let syncTask: Promise<Library> | undefined;
 export function sync() {
@@ -69,17 +71,9 @@ async function synchronize() {
   for (const p of pending) {
     await request("progress/" + p.id, "PUT", p);
   }
-  const q = await get<string[]>("queue");
-  if (q) await request("queue", "PUT", { ids: q });
   const fresh = await request<Library>("library");
   const tx = d.transaction(["meta", "progress"], "readwrite");
   await tx.objectStore("meta").put(fresh, "library");
-  if (
-    q &&
-    JSON.stringify(await tx.objectStore("meta").get("queue")) ===
-      JSON.stringify(q)
-  )
-    await tx.objectStore("meta").delete("queue");
   for (const p of pending) {
     const s = tx.objectStore("progress");
     if ((await s.get(p.id))?.updated === p.updated) await s.delete(p.id);
@@ -130,7 +124,7 @@ export async function download(
   report: (n: number) => void,
   manual: boolean,
 ) {
-  const res = await fetch("/api/audio/" + e.id);
+  const res = await fetch(apiPath("audio/" + e.id));
   if (!res.ok || !res.body)
     throw Error("Audio download unavailable. Try again when connected.");
   const total = Number(res.headers.get("Content-Length"));
