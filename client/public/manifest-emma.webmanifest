@@ -1,0 +1,22 @@
+{
+  "id": "/emma",
+  "name": "Airwave · Emma",
+  "short_name": "Airwave · Emma",
+  "start_url": "/emma",
+  "display": "standalone",
+  "background_color": "#141316",
+  "theme_color": "#141316",
+  "icons": [
+    {
+      "src": "/icon-192-v2.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/icon-512-v2.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ],
+  "scope": "/emma"
+}
