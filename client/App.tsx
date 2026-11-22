@@ -46,6 +46,7 @@ import {
 } from "./storage";
 import { audio, phone, Remote } from "./player";
 const empty: Library = { episodes: [], podcasts: [], queue: [] };
+type PodcastSearchResult = { title: string; url: string; author: string; image: string };
 const fmt = (n: number) =>
   Math.floor(n / 60) + ":" + String(Math.floor(n % 60)).padStart(2, "0");
 const minutes = (s: number) =>
@@ -134,6 +135,9 @@ export default function App() {
     [online, setOnline] = useState(navigator.onLine),
     [input, setInput] = useState(""),
     [busy, setBusy] = useState(false);
+  const [search, setSearch] = useState(""),
+    [searchResults, setSearchResults] = useState<PodcastSearchResult[]>([]),
+    [searching, setSearching] = useState(false);
   const [id, setEpisodeId] = useState(""),
     [playing, setPlaying] = useState(false),
     [pos, setPosition] = useState(0),
@@ -507,8 +511,21 @@ export default function App() {
       setBusy(false);
     }
   }
+  async function searchPodcasts(ev: FormEvent) {
+    ev.preventDefault();
+    setSearching(true);
+    try {
+      setSearchResults(await request<PodcastSearchResult[]>("search-podcasts?q=" + encodeURIComponent(search.trim())));
+    } catch (e) {
+      report(e);
+    } finally {
+      setSearching(false);
+    }
+  }
   const show = (m: string) => {
     setInput("");
+    setSearch("");
+    setSearchResults([]);
     setModal(m);
   };
   const tabs = [
@@ -963,27 +980,45 @@ export default function App() {
                 <p>{selected.description}</p>
               </div>
             )}
-            {(modal === "add" || modal === "login") && (
+            {modal === "add" && (
+              <>
+                <form onSubmit={searchPodcasts}>
+                  <label>
+                    Search podcasts
+                    <input autoFocus type="search" minLength={2} maxLength={100} placeholder="The Rest Is History" value={search} onChange={(e) => setSearch(e.target.value)} />
+                  </label>
+                  <button className="primary" disabled={searching || search.trim().length < 2}>{searching ? "Searching…" : "Search"}</button>
+                </form>
+                {searchResults.length > 0 && (
+                  <div className="podcast-results" aria-label="Search results">
+                    {searchResults.map((result) => (
+                      <button key={result.url} type="button" onClick={() => { setInput(result.url); setSearchResults([]); }}>
+                        {result.image && <img src={result.image} alt="" />}
+                        <span><strong>{result.title}</strong>{result.author && <small>{result.author}</small>}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+                <form onSubmit={submit}>
+                  <label>RSS feed URL<input required type="url" placeholder="https://example.com/feed.xml" value={input} onChange={(e) => setInput(e.target.value)} /></label>
+                  <button className="primary" disabled={busy}>{busy ? "Connecting…" : "Subscribe"}</button>
+                </form>
+              </>
+            )}
+            {modal === "login" && (
               <form onSubmit={submit}>
                 <label>
-                  {modal === "add" ? "RSS feed URL" : "Library password"}
+                  Library password
                   <input
                     autoFocus
                     required
-                    type={modal === "add" ? "url" : "password"}
-                    placeholder={
-                      modal === "add" ? "https://example.com/feed.xml" : ""
-                    }
+                    type="password"
                     value={input}
                     onChange={(e) => setInput(e.target.value)}
                   />
                 </label>
                 <button className="primary" disabled={busy}>
-                  {busy
-                    ? "Connecting…"
-                    : modal === "add"
-                      ? "Subscribe"
-                      : "Sign in"}
+                  {busy ? "Connecting…" : "Sign in"}
                 </button>
               </form>
             )}

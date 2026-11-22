@@ -74,6 +74,46 @@ app.use("/api", (q, r, next) => {
   next();
 });
 app.get("/api/library", (_q, r) => r.json(library(db)));
+app.get("/api/search-podcasts", async (q, r) => {
+  const term = String(q.query.q ?? "").trim();
+  if (term.length < 2 || term.length > 100) {
+    r.status(400).json({ error: "Enter at least 2 characters to search" });
+    return;
+  }
+  const key = process.env.PODCAST_INDEX_API_KEY;
+  const secret = process.env.PODCAST_INDEX_API_SECRET;
+  if (!key || !secret) {
+    r.status(503).json({ error: "Podcast search is not configured on the server" });
+    return;
+  }
+  const timestamp = Math.floor(Date.now() / 1000).toString();
+  const auth = createHash("sha1")
+    .update(key + secret + timestamp)
+    .digest("hex");
+  const url = new URL("https://api.podcastindex.org/api/1.0/search/byterm");
+  url.searchParams.set("q", term);
+  url.searchParams.set("max", "12");
+  const result = await fetch(url, {
+    headers: {
+      "User-Agent": "Airwave/1.0",
+      "X-Auth-Key": key,
+      "X-Auth-Date": timestamp,
+      "Authorization": auth,
+    },
+    signal: AbortSignal.timeout(10000),
+  });
+  if (!result.ok) throw Error("Podcast Index search failed (" + result.status + ")");
+  const data = (await result.json()) as { feeds?: Array<Record<string, unknown>> };
+  r.json((data.feeds ?? []).flatMap((feed) => {
+    if (typeof feed.title !== "string" || typeof feed.url !== "string") return [];
+    return [{
+      title: feed.title,
+      url: feed.url,
+      author: typeof feed.author === "string" ? feed.author : "",
+      image: typeof feed.image === "string" ? feed.image : "",
+    }];
+  }));
+});
 app.post("/api/podcasts", async (q, r) => {
   const url = externalURL(q.body.url).href;
   const id = ingest(db, await fetchXML(url), url);

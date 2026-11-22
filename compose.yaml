@@ -11,6 +11,8 @@ services:
       REFRESH_MINUTES: ${REFRESH_MINUTES:-60}
       SONOS_HOSTS: ${SONOS_HOSTS:-}
       SONOS_MODE: ${SONOS_MODE:-local}
+      PODCAST_INDEX_API_KEY: ${PODCAST_INDEX_API_KEY:-}
+      PODCAST_INDEX_API_SECRET: ${PODCAST_INDEX_API_SECRET:-}
     volumes:
       - library:/data
       - audio:/audio

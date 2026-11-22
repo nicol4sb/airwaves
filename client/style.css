@@ -612,6 +612,38 @@ nav button[aria-current] {
   background: var(--accent);
   color: #251c31;
 }
+.podcast-results {
+  display: grid;
+  gap: 6px;
+  margin: 12px 0 18px;
+  max-height: 260px;
+  overflow: auto;
+}
+.podcast-results button {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 8px;
+  text-align: left;
+  border-radius: 10px;
+  background: #17151a;
+  color: white;
+}
+.podcast-results img {
+  width: 44px;
+  height: 44px;
+  border-radius: 7px;
+  object-fit: cover;
+}
+.podcast-results span,
+.podcast-results small {
+  display: block;
+}
+.podcast-results small {
+  margin-top: 3px;
+  color: #aaa2b1;
+}
 .sheet label {
   display: block;
   color: #d6d0dc;
