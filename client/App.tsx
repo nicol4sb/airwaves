@@ -496,17 +496,28 @@ export default function App() {
     })));
   }
   async function deletePodcast(podcastId: string) {
-    await request("podcasts/" + podcastId, "DELETE");
-    setLib((currentLib) => ({
-      ...currentLib,
-      podcasts: currentLib.podcasts.filter((p) => p.id !== podcastId),
-      episodes: currentLib.episodes.filter((e) => e.podcastId !== podcastId),
-      queue: currentLib.queue.filter((episodeId) =>
-        currentLib.episodes.some((e) => e.id === episodeId && e.podcastId !== podcastId),
+    const previous = lib;
+    const next = {
+      ...lib,
+      podcasts: lib.podcasts.filter((p) => p.id !== podcastId),
+      episodes: lib.episodes.filter((e) => e.podcastId !== podcastId),
+      queue: lib.queue.filter((episodeId) =>
+        lib.episodes.some((e) => e.id === episodeId && e.podcastId !== podcastId),
       ),
-    }));
+    };
+    setLib(next);
+    setPodcastId("");
+    setModal("");
     setSwipedPodcast("");
-    void refresh();
+    await put("library", next);
+    try {
+      await request("podcasts/" + podcastId, "DELETE");
+      void refresh();
+    } catch (error) {
+      setLib(previous);
+      await put("library", previous);
+      report(error);
+    }
   }
   useEffect(() => {
     if (!online || !ready || !lib.episodes.length) return;
@@ -579,23 +590,39 @@ export default function App() {
   async function addPodcast(result: PodcastSearchResult) {
     if (addingPodcastURL) return;
     setAddingPodcastURL(result.url);
+    let optimistic: Library | undefined;
+    let optimisticId = "";
     try {
+      const normalizedURL = new URL(result.url).href;
+      const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(normalizedURL));
+      optimisticId = [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+      const localPodcast: Podcast = { id: optimisticId, title: result.title, url: normalizedURL, art: result.image, error: "" };
+      optimistic = { ...lib, podcasts: [...lib.podcasts.filter((p) => p.id !== optimisticId), localPodcast].sort((a, b) => a.title.localeCompare(b.title)) };
+      setLib(optimistic);
+      setModal("");
+      void put("library", optimistic);
       const added = await request<{ id: string; podcast: Podcast }>("podcasts", "POST", {
-        url: result.url,
+        url: normalizedURL,
         title: result.title,
         art: result.image,
       });
-      setLib((currentLib) => currentLib.podcasts.some((p) => p.id === added.id)
-        ? currentLib
-        : { ...currentLib, podcasts: [...currentLib.podcasts, added.podcast].sort((a, b) => a.title.localeCompare(b.title)) });
-      const local = await localLibrary();
-      const libraryToStore = local ?? lib;
-      await put("library", libraryToStore.podcasts.some((p) => p.id === added.id)
-        ? libraryToStore
-        : { ...libraryToStore, podcasts: [...libraryToStore.podcasts, added.podcast] });
-      setModal("");
+      setLib((currentLib) => ({
+        ...currentLib,
+        podcasts: currentLib.podcasts.map((p) => p.id === optimisticId ? added.podcast : p),
+      }));
+      void put("library", {
+        ...optimistic,
+        podcasts: optimistic.podcasts.map((p) => p.id === optimisticId ? added.podcast : p),
+      });
       void refresh();
     } catch (e) {
+      if (optimistic) {
+        if (optimisticId) {
+          setLib((currentLib) => ({ ...currentLib, podcasts: currentLib.podcasts.filter((p) => p.id !== optimisticId) }));
+          const local = await localLibrary();
+          if (local) await put("library", { ...local, podcasts: local.podcasts.filter((p) => p.id !== optimisticId) });
+        }
+      }
       report(e);
     } finally {
       setAddingPodcastURL("");
@@ -811,7 +838,7 @@ export default function App() {
           <>
             <div className="sectionhead">
               <span />
-              <button className="icon" aria-label="Add podcast" onClick={() => show("add")}>
+                  <button className="add-podcast" aria-label="Add podcast" onClick={() => show("add")}>
                 <Plus size={19} />
               </button>
             </div>
@@ -1104,14 +1131,7 @@ export default function App() {
                 </p>
                 <button
                   className="primary"
-                  onClick={() =>
-                    run(async () => {
-                      await request("podcasts/" + detail, "DELETE");
-                      setPodcastId("");
-                      setModal("");
-                      await refresh();
-                    })
-                  }
+                  onClick={() => run(() => deletePodcast(detail))}
                 >
                   Remove podcast
                 </button>
