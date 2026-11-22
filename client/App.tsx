@@ -29,6 +29,7 @@ import {
   Smartphone,
   ArrowLeft,
   WifiOff,
+  Trash2,
 } from "lucide-react";
 import type { Library, Episode, Speaker } from "../shared/types";
 import {
@@ -150,7 +151,15 @@ export default function App() {
     [remote, setRemote] = useState<Remote | null>(null),
     [volume, setVolume] = useState(25);
   const [foreground, setForeground] = useState(0);
+  const [swipedPodcast, setSwipedPodcast] = useState("");
+  const [swipedEpisode, setSwipedEpisode] = useState("");
   const running = useRef(new Set<string>()),
+    podcastPress = useRef(new Map<string, number>()),
+    podcastGesture = useRef(new Map<string, { x: number; y: number }>()),
+    ignorePodcastClick = useRef(new Set<string>()),
+    episodePress = useRef(new Map<string, number>()),
+    episodeGesture = useRef(new Map<string, { x: number; y: number }>()),
+    ignoreEpisodeClick = useRef(new Set<string>()),
     last = useRef(0),
     current = useRef({ id: "", pos: 0, playing: false }),
     player = remote ?? phone;
@@ -567,14 +576,50 @@ export default function App() {
   );
   const row = (e: Episode, index: number) => (
     <article
-      className="row"
+      className={"row " + (swipedEpisode === e.id ? "swiped" : "")}
       key={e.id}
-      onContextMenu={(event) => {
-        if (!saved.includes(e.id)) return;
-        event.preventDefault();
-        run(() => removeDownload(e));
+      onPointerDown={(event) => {
+        if (!saved.includes(e.id) || (event.pointerType === "mouse" && event.button !== 0)) return;
+        episodeGesture.current.set(e.id, { x: event.clientX, y: event.clientY });
+        episodePress.current.set(e.id, window.setTimeout(() => {
+          ignoreEpisodeClick.current.add(e.id);
+          setSwipedEpisode(e.id);
+        }, 550));
       }}
-      title={saved.includes(e.id) ? "Long press to delete download" : undefined}
+      onPointerMove={(event) => {
+        const start = episodeGesture.current.get(e.id);
+        if (!start) return;
+        if (Math.abs(event.clientX - start.x) > 12 || Math.abs(event.clientY - start.y) > 12) {
+          window.clearTimeout(episodePress.current.get(e.id));
+          episodePress.current.delete(e.id);
+        }
+      }}
+      onPointerUp={(event) => {
+        window.clearTimeout(episodePress.current.get(e.id));
+        episodePress.current.delete(e.id);
+        const start = episodeGesture.current.get(e.id);
+        episodeGesture.current.delete(e.id);
+        if (!start) return;
+        const dx = event.clientX - start.x;
+        if (dx < -55) {
+          ignoreEpisodeClick.current.add(e.id);
+          setSwipedEpisode(e.id);
+        } else if (dx > 55 && swipedEpisode === e.id) {
+          ignoreEpisodeClick.current.add(e.id);
+          setSwipedEpisode("");
+        }
+      }}
+      onPointerCancel={() => {
+        window.clearTimeout(episodePress.current.get(e.id));
+        episodePress.current.delete(e.id);
+        episodeGesture.current.delete(e.id);
+      }}
+      onClickCapture={(event) => {
+        if (!ignoreEpisodeClick.current.delete(e.id)) return;
+        if ((event.target as HTMLElement).closest(".episode-delete")) return;
+        event.preventDefault();
+        event.stopPropagation();
+      }}
     >
       <button
         className="artplay"
@@ -664,6 +709,15 @@ export default function App() {
               {lib.queue.includes(e.id) ? <Check /> : <Plus />}
             </IconButton>
           </>
+        )}
+        {swipedEpisode === e.id && saved.includes(e.id) && (
+          <button className="episode-delete" aria-label="Delete downloaded episode" onClick={() => {
+            ignoreEpisodeClick.current.delete(e.id);
+            setSwipedEpisode("");
+            run(() => removeDownload(e));
+          }}>
+            <Trash2 size={17} /> Delete
+          </button>
         )}
         <button
           className="round"
@@ -756,30 +810,82 @@ export default function App() {
               </button>
             </div>
             {lib.podcasts.map((p) => (
-              <button
-                className="subscription"
+              <div
+                className="subscription-swipe"
                 key={p.id}
-                onContextMenu={(event) => {
-                  event.preventDefault();
-                  setPodcastId(p.id);
-                  setModal("remove");
+                onPointerDown={(event) => {
+                  if (event.pointerType === "mouse" && event.button !== 0) return;
+                  podcastGesture.current.set(p.id, { x: event.clientX, y: event.clientY });
+                  const timer = window.setTimeout(() => {
+                    ignorePodcastClick.current.add(p.id);
+                    setPodcastId(p.id);
+                    setModal("remove");
+                  }, 550);
+                  podcastPress.current.set(p.id, timer);
                 }}
-                title="Long press to remove podcast"
-                onClick={() => {
-                  setPodcastId(p.id);
-                  setVisibleCount(15);
+                onPointerMove={(event) => {
+                  const start = podcastGesture.current.get(p.id);
+                  if (!start) return;
+                  const dx = event.clientX - start.x;
+                  const dy = event.clientY - start.y;
+                  if (Math.abs(dx) > 12 || Math.abs(dy) > 12) {
+                    window.clearTimeout(podcastPress.current.get(p.id));
+                    podcastPress.current.delete(p.id);
+                  }
+                }}
+                onPointerUp={(event) => {
+                  window.clearTimeout(podcastPress.current.get(p.id));
+                  podcastPress.current.delete(p.id);
+                  const start = podcastGesture.current.get(p.id);
+                  podcastGesture.current.delete(p.id);
+                  if (!start) return;
+                  const dx = event.clientX - start.x;
+                  if (dx < -55) {
+                    ignorePodcastClick.current.add(p.id);
+                    setSwipedPodcast(p.id);
+                  } else if (dx > 55 && swipedPodcast === p.id) {
+                    ignorePodcastClick.current.add(p.id);
+                    setSwipedPodcast("");
+                  }
+                }}
+                onPointerCancel={() => {
+                  window.clearTimeout(podcastPress.current.get(p.id));
+                  podcastPress.current.delete(p.id);
+                  podcastGesture.current.delete(p.id);
                 }}
               >
-                <Art e={p} />
-                <div>
-                  <b>{p.title}</b>
-                  <small>
-                    {lib.episodes.filter((e) => e.podcastId === p.id).length}{" "}
-                    episodes {p.error ? " · Refresh pending" : ""}
-                  </small>
-                </div>
-                <ChevronRight />
-              </button>
+                <button
+                  className="subscription"
+                  onClick={() => {
+                    if (ignorePodcastClick.current.delete(p.id)) return;
+                    setPodcastId(p.id);
+                    setVisibleCount(15);
+                  }}
+                >
+                  <Art e={p} />
+                  <div>
+                    <b>{p.title}</b>
+                    <small>
+                      {lib.episodes.filter((e) => e.podcastId === p.id).length}{" "}
+                      episodes {p.error ? " · Refresh pending" : ""}
+                    </small>
+                  </div>
+                  <ChevronRight />
+                </button>
+                {swipedPodcast === p.id && (
+                  <button
+                    className="subscription-delete"
+                    aria-label={"Unsubscribe from " + p.title}
+                    onClick={() => {
+                      setPodcastId(p.id);
+                      setModal("remove");
+                      setSwipedPodcast("");
+                    }}
+                  >
+                    <Trash2 size={17} /> Delete
+                  </button>
+                )}
+              </div>
             ))}
           </>
         ) : (

@@ -417,6 +417,22 @@ small span {
   gap: 16px;
   border-top: 1px solid var(--line);
   padding: 15px 0;
+  touch-action: pan-y;
+  -webkit-touch-callout: none;
+  user-select: none;
+}
+.row.swiped .actions > .icon {
+  display: none;
+}
+.episode-delete {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 7px;
+  padding: 0 13px;
+  border-radius: 9px;
+  background: #a83e4b;
+  color: white;
 }
 .artplay {
   padding: 0;
@@ -490,6 +506,16 @@ small span {
 .empty {
   padding: 26px 0;
 }
+.subscription-swipe {
+  display: flex;
+  align-items: stretch;
+  overflow: hidden;
+  border-radius: 12px;
+  margin: 8px 0;
+  touch-action: pan-y;
+  -webkit-touch-callout: none;
+  user-select: none;
+}
 .subscription {
   display: flex;
   align-items: center;
@@ -497,10 +523,22 @@ small span {
   background: var(--panel);
   border: 1px solid var(--line);
   padding: 15px;
-  width: 100%;
+  flex: 1;
+  min-width: 0;
   border-radius: 12px;
   text-align: left;
-  margin: 8px 0;
+  margin: 0;
+}
+.subscription-delete {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 7px;
+  padding: 0 16px;
+  margin-left: 8px;
+  border-radius: 10px;
+  background: #a83e4b;
+  color: white;
 }
 .subscription svg:last-child {
   margin-left: auto;
