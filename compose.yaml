@@ -1,0 +1,44 @@
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      APP_PASSWORD: ${APP_PASSWORD:?Set APP_PASSWORD in .env}
+      CACHE_MB: ${CACHE_MB:-2048}
+      RETENTION_DAYS: ${RETENTION_DAYS:-30}
+      INITIAL_DOWNLOADS: ${INITIAL_DOWNLOADS:-1}
+      REFRESH_MINUTES: ${REFRESH_MINUTES:-60}
+      SONOS_HOSTS: ${SONOS_HOSTS:-}
+      SONOS_MODE: ${SONOS_MODE:-local}
+    volumes:
+      - library:/data
+      - audio:/audio
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4173/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      APP_HOST: ${APP_HOST:-airwave.home.arpa}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      app:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD","caddy","validate","--config","/etc/caddy/Caddyfile"]
+      interval: 1m
+      timeout: 10s
+      retries: 3
+volumes:
+  library:
+  audio:
+  caddy_data:
+  caddy_config:

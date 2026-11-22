@@ -1,0 +1,7 @@
+{$APP_HOST:airwave.home.arpa} {
+ tls internal
+ encode zstd gzip
+ header X-Content-Type-Options nosniff
+ header Referrer-Policy same-origin
+ reverse_proxy 127.0.0.1:4173
+}

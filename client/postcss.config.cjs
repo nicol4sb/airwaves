@@ -1,0 +1,1 @@
+module.exports={plugins:{tailwindcss:{content:['./client/**/*.{tsx,html}']},autoprefixer:{}}}
