@@ -1,13 +1,39 @@
 import express from "express";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { database, ingest, library, progress, transaction } from "./db";
+import { database, ingest, library, progress, setStar, stars, transaction } from "./db";
 import { DEFAULT_FEED, hash } from "./rss";
 import { externalURL, fetchXML, openExternal, publicHost } from "./network";
 import { pipeline } from "node:stream/promises";
 import { radioById } from "../shared/radio";
 import { AudioCache } from "./cache";
 import type { SonosAdapter } from "../sonos/adapter";
+import type { Episode } from "../shared/types";
+
+function starSnapshot(id: string, value: unknown): Episode {
+  if (!value || typeof value !== "object") throw Error("Invalid starred episode");
+  const e = value as Episode;
+  const listenedAt = e.listenedAt ?? (e.position > 0 ? e.updated : 0);
+  if (typeof e.podcastId !== "string" || !e.podcastId || e.podcastId.length > 128 ||
+    typeof e.title !== "string" || typeof e.audio !== "string" ||
+    !Number.isFinite(e.date) || !Number.isFinite(e.duration) ||
+    !Number.isFinite(e.position) || e.position < 0 || (e.played !== 0 && e.played !== 1) ||
+    !Number.isSafeInteger(e.updated) || e.updated < 0 ||
+    !Number.isSafeInteger(listenedAt) || listenedAt < 0) throw Error("Invalid starred episode");
+  const art = typeof e.art === "string" && e.art
+    ? /^\/art\/[a-f\d]{16}\.jpg$/.test(e.art) ? e.art : externalURL(e.art).href
+    : "";
+  const transcript = typeof e.transcript?.url === "string" && typeof e.transcript.type === "string"
+    ? { url: externalURL(e.transcript.url).href, type: e.transcript.type.slice(0, 100) }
+    : null;
+  return {
+    id, podcastId: e.podcastId, podcastTitle: typeof e.podcastTitle === "string" ? e.podcastTitle.slice(0, 300) : undefined,
+    title: e.title.slice(0, 500), art, transcript, audio: externalURL(e.audio).href,
+    description: typeof e.description === "string" ? e.description.slice(0, 4000) : "",
+    date: e.date, duration: e.duration, position: e.position, played: e.played, updated: e.updated,
+    listenedAt, cached: "none",
+  };
+}
 
 export function openProfile(dir: string, audioDir: string, seedStarter: boolean, sonos: SonosAdapter) {
   mkdirSync(dir, { recursive: true });
@@ -18,7 +44,14 @@ export function openProfile(dir: string, audioDir: string, seedStarter: boolean,
   }
   const cache = new AudioCache(db, audioDir);
   const router = express.Router();
-  router.get("/library", (_q, r) => r.json(library(db)));
+  router.get("/library", (_q, r) => r.json({ ...library(db), stars: stars(db) }));
+  router.put("/stars/:id", (q, r) => {
+    const { id } = q.params;
+    const { updated, episode } = q.body ?? {};
+    if (!/^[\w-]{1,128}$/.test(id) || !Number.isSafeInteger(updated) ||
+      updated < 0 || updated > Date.now() + 300000) throw Error("Invalid star change");
+    r.json(setStar(db, { id, updated, episode: episode === null ? null : starSnapshot(id, episode) }));
+  });
   const feedImports = new Map<string, Promise<void>>();
   function importFeed(id: string, url: string) {
     const current = feedImports.get(id);
@@ -51,16 +84,17 @@ export function openProfile(dir: string, audioDir: string, seedStarter: boolean,
     r.json({ ok: true });
   });
   router.put("/progress/:id", (q, r) => {
-    const { position, played, updated } = q.body;
+    const { position, played, updated, listenedAt } = q.body;
     if (
       !Number.isFinite(position) ||
       position < 0 ||
       typeof played !== "boolean" ||
       !Number.isSafeInteger(updated) ||
-      updated > Date.now() + 300000
+      updated > Date.now() + 300000 ||
+      (listenedAt !== undefined && (!Number.isSafeInteger(listenedAt) || listenedAt < 0 || listenedAt > updated))
     )
       throw Error("Invalid playback progress");
-    progress(db, q.params.id, position, played, updated);
+    progress(db, q.params.id, position, played, updated, listenedAt);
     r.json({ ok: true });
   });
   router.put("/queue", (q, r) => {
@@ -91,13 +125,15 @@ export function openProfile(dir: string, audioDir: string, seedStarter: boolean,
   router.get("/download/:id", async (q, r) => {
     const id = q.params.id;
     const row = db.prepare("SELECT audio,cached,mime FROM episodes WHERE id=?").get(id);
-    if (!row) return r.status(404).json({ error: "Episode unavailable" });
-    if (row.cached === "ready" && existsSync(cache.path(id))) {
+    const source = row ?? db.prepare(`SELECT json_extract(episode, '$.audio') AS audio
+      FROM stars WHERE id=? AND episode IS NOT NULL`).get(id);
+    if (!source?.audio) return r.status(404).json({ error: "Episode unavailable" });
+    if (row?.cached === "ready" && existsSync(cache.path(id))) {
       r.type(String(row.mime)).sendFile(cache.path(id), { cacheControl: false });
       return;
     }
     // Interactive downloads stream immediately, independently of the Pi’s cache worker.
-    const upstream = await openExternal(String(row.audio), 600_000);
+    const upstream = await openExternal(String(source.audio), 600_000);
     if (r.destroyed) { upstream.destroy(); return; }
     r.type(String(upstream.headers["content-type"] ?? "audio/mpeg"));
     if (upstream.headers["content-length"]) r.set("Content-Length", upstream.headers["content-length"]);

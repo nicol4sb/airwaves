@@ -1,5 +1,6 @@
 import type { RadioStation } from "./types";
 
+export const radioFranceOrigin = "https://icecast.radiofrance.fr";
 export const stations: RadioStation[] = [
   ["franceinter", "France Inter", "franceinter-midfi"],
   ["franceinfo", "franceinfo", "franceinfo-midfi"],
@@ -8,7 +9,7 @@ export const stations: RadioStation[] = [
   ["fip", "FIP", "fip-midfi"],
   ["mouv", "Mouv’", "mouv-midfi"],
 ].map(([id, name, stream]) => ({
-  id, name, url: "https://icecast.radiofrance.fr/" + stream + ".mp3", art: "", group: "Radio France",
+  id, name, url: radioFranceOrigin + "/" + stream + ".mp3", art: "", group: "Radio France",
 }));
 
 const directory = "https://de1.api.radio-browser.info/json/stations/";

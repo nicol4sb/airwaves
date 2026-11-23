@@ -1,4 +1,5 @@
 import {
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -8,7 +9,8 @@ import {
 } from "react";
 import {
   AudioLines,
-  Headphones,
+  ListMusic,
+  Bookmark,
   Search,
   Play,
   Pause,
@@ -32,6 +34,7 @@ import {
   WifiOff,
   LoaderCircle,
   Trash2,
+  Star,
   MoreHorizontal,
   Radio as RadioIcon,
 } from "lucide-react";
@@ -48,14 +51,26 @@ import {
   put,
   request,
   saveProgress,
+  setStar,
+  setStationHidden,
+  starredEpisodes,
   sync,
 } from "./storage";
 import { audio, phone, Remote } from "./player";
 import Radio from "./Radio";
+import SwipeActionRow from "./SwipeActionRow";
 import EpisodeDetails from "./EpisodeDetails";
 import { haptic, useRowActions } from "./rowActions";
-import { profileLabel } from "./profile";
+import { usePlayerDismiss } from "./usePlayerDismiss";
+import { lastListened, withProgress } from "./listening";
 const empty: Library = { episodes: [], podcasts: [], queue: [] };
+const tabs = [
+  ["Podcasts", PodcastIcon],
+  ["Queue", ListMusic],
+  ["Saved", Bookmark],
+  ["Radio", RadioIcon],
+] as const;
+type Tab = (typeof tabs)[number][0];
 type PodcastSearchResult = { id: string; title: string; url: string; author: string; image: string };
 const fmt = (n: number) =>
   Math.floor(n / 60) + ":" + String(Math.floor(n % 60)).padStart(2, "0");
@@ -90,6 +105,26 @@ function IconButton({
     </button>
   );
 }
+function EpisodeStar({ starred, click, compact = false }: {
+  starred: boolean;
+  click: () => void;
+  compact?: boolean;
+}) {
+  const label = starred ? "Unstar episode" : "Star episode";
+  return (
+    <button
+      type="button"
+      className={"episode-star " + (compact ? "icon" : "secondary")}
+      aria-pressed={starred}
+      aria-label={label}
+      title={label}
+      onClick={click}
+    >
+      <Star size={18} fill={starred ? "currentColor" : "none"} />
+      {!compact && (starred ? "Starred" : "Star")}
+    </button>
+  );
+}
 function Art({ e, eager = false }: { e: { art: string; title: string }; eager?: boolean }) {
   return (
     <span className="art">
@@ -120,45 +155,17 @@ function EpisodeImportStatus({ podcast, online }: { podcast: Podcast; online: bo
     </span>
   );
 }
-function Cassette({ name }: { name: string }) {
-  return (
-    <div className="illustration" aria-hidden="true">
-      <div className="orbit" />
-      <div className="tape">
-        <i />
-        <i />
-        <i />
-        <i />
-        <div className="label">
-          <div className="hand">{name}</div>
-          <div className="stripes" />
-          <div className="window">
-            <b />
-            <span />
-            <b />
-          </div>
-        </div>
-        <div className="foot">
-          <b />
-          <span />
-          <span />
-          <b />
-        </div>
-      </div>
-    </div>
-  );
-}
 export default function App() {
   const [lib, setLib] = useState<Library>(empty),
-    [tab, setTab] = useState("Episodes"),
-    [filter, setFilter] = useState("Unplayed"),
+    [tab, setTab] = useState<Tab>("Podcasts"),
+    [filter, setFilter] = useState<"Starred" | "Downloaded">("Starred"),
     [detail, setPodcastId] = useState(""),
     [episodeQuery, setEpisodeQuery] = useState(""),
     [count, setVisibleCount] = useState(15);
   const [modal, setModal] = useState(""),
     [message, msg] = useState(""),
     [ready, setReady] = useState(false),
-    [online, setOnline] = useState(navigator.onLine),
+    [serverReachable, setServerReachable] = useState<boolean>(),
     [input, setInput] = useState(""),
     [busy, setBusy] = useState(false);
   const [search, setSearch] = useState(""),
@@ -180,12 +187,19 @@ export default function App() {
   const volumeTarget = useRef<Remote | null>(null);
   const [foreground, setForeground] = useState(0);
   const [downloaded, setDownloaded] = useState<Episode[]>([]);
+  const [starred, setStarred] = useState<Episode[]>([]);
+  const starredIds = useMemo(() => new Set(starred.map(e => e.id)), [starred]);
   const [activeEpisode, setActiveEpisode] = useState<Episode>();
+  const [startingStation, setStartingStation] = useState<string>();
   const [readEpisode, setReadEpisode] = useState<Episode>();
   const [actionPodcast, setActionPodcast] = useState<Podcast>();
   const [actionEpisode, setActionEpisode] = useState<Episode>();
+  const [actionStation, setActionStation] = useState<RadioStation>();
+  const [hiddenStations, setHiddenStations] = useState<RadioStation[]>([]);
   const rowActions = useRowActions();
-  const dismissGesture = useRef<{ x: number; y: number } | null>(null);
+  const dismissModal = useCallback(() => setModal(""), []);
+  const playerDismiss = usePlayerDismiss(modal === "player", dismissModal);
+  const closeModal = modal === "player" ? playerDismiss.close : dismissModal;
   const backdropPressed = useRef(false);
   const playbackAttempt = useRef(0);
   const pendingDelete = useRef(new Set<string>());
@@ -194,19 +208,16 @@ export default function App() {
     current = useRef({ id: "", pos: 0, playing: false }),
     searchRequest = useRef(0);
   const pickerOpen = modal === "devices";
+  const online = serverReachable ?? navigator.onLine;
   const remoteUnavailable = !online || !!speakerError;
   const player = remoteUnavailable ? phone : remote ?? phone;
   const deviceLabel = remote && !remoteUnavailable ? remote.speaker.name : "This device";
   const episode = lib.episodes.find((e) => e.id === id)
     ?? downloaded.find((e) => e.id === id)
-    ?? (activeEpisode?.id === id ? activeEpisode : undefined),
-    recent = [...lib.episodes]
-      .filter((e) => e.position > 0 && !e.played)
-      .sort((a, b) => b.updated - a.updated);
-  const hero = recent[0] ?? lib.episodes[0],
-    selected = episode ?? hero,
-    name = (e: Episode) =>
-      e.station?.group || lib.podcasts.find((p) => p.id === e.podcastId)?.title || e.podcastTitle || "Podcast";
+    ?? starred.find((e) => e.id === id)
+    ?? (activeEpisode?.id === id ? activeEpisode : undefined);
+  const name = (e: Episode) =>
+    e.station?.group || lib.podcasts.find((p) => p.id === e.podcastId)?.title || e.podcastTitle || "Podcast";
   const report = (e: unknown) =>
     msg(e instanceof Error ? e.message : String(e));
   const run = (fn: () => Promise<unknown>) => {
@@ -227,9 +238,10 @@ export default function App() {
         episodes: fresh.episodes.filter(episode => !removed.has(episode.podcastId)),
       } : fresh);
       await refreshDownloads();
-      setOnline(true);
+      setStarred(await starredEpisodes());
+      setServerReachable(true);
     } catch (e) {
-      setOnline(false);
+      setServerReachable(false);
       if (navigator.onLine && !(await localLibrary())) report(e);
     } finally {
       setReady(true);
@@ -240,22 +252,25 @@ export default function App() {
     const wake = () => {
       if (!document.hidden) run(refresh);
     };
-    const lost = () => setOnline(false);
+    const lost = () => setServerReachable(false);
     window.addEventListener("login-needed", login);
     const resumeSync = () => {
       if (!document.hidden) {
+        setServerReachable(undefined);
         setForeground((n) => n + 1);
         wake();
       }
     };
     document.addEventListener("visibilitychange", resumeSync);
-    window.addEventListener("online", wake);
+    window.addEventListener("online", resumeSync);
     window.addEventListener("offline", lost);
     run(async () => {
       const initial = (await localLibrary()) ?? empty;
       setLib(initial);
       await rememberDownloads(initial.episodes, initial.podcasts);
       await refreshDownloads();
+      setStarred(await starredEpisodes());
+      setHiddenStations((await get<RadioStation[]>("hidden-stations")) ?? []);
       setAutoCount((await get<number>("auto")) ?? 0);
       await refresh();
     });
@@ -264,12 +279,11 @@ export default function App() {
       clearInterval(timer);
       window.removeEventListener("login-needed", login);
       document.removeEventListener("visibilitychange", resumeSync);
-      window.removeEventListener("online", wake);
+      window.removeEventListener("online", resumeSync);
       window.removeEventListener("offline", lost);
     };
   }, []);
-  const importingPodcast = lib.podcasts.find((p) => p.importPending && !p.error);
-  const importingEpisodes = !!importingPodcast;
+  const importingEpisodes = lib.podcasts.some(p => p.importPending && !p.error);
   useEffect(() => {
     if (!online || !importingEpisodes || addingPodcastURL) return;
     const timer = window.setInterval(() => {
@@ -282,20 +296,23 @@ export default function App() {
     const t = setTimeout(() => msg(""), 6000);
     return () => clearTimeout(t);
   }, [message]);
-  async function storePosition(key: string, value: number, ended = false) {
+  async function storePosition(key: string, value: number, ended = false, listened = value > 0 || ended) {
     if (!key || key.startsWith("radio:") || !Number.isFinite(value)) return;
-    const p = { id: key, position: value, updated: Date.now(), played: ended };
+    const updated = Date.now();
+    const p = { id: key, position: value, updated, played: ended, listenedAt: listened ? updated : 0 };
+    const apply = (e: Episode) => e.id === key ? withProgress(e, p) : e;
     setLib((l) => ({
       ...l,
-      episodes: l.episodes.map((e) =>
-        e.id === key ? { ...e, ...p, played: +ended } : e,
-      ),
+      episodes: l.episodes.map(apply),
     }));
-    setDownloaded(episodes => episodes.map(e => e.id === key ? { ...e, ...p, played: +ended } : e));
+    setDownloaded(episodes => episodes.some(e => e.id === key) ? episodes.map(apply) : episodes);
+    setStarred(episodes => episodes.some(e => e.id === key) ? episodes.map(apply) : episodes);
+    setActiveEpisode(e => e && apply(e));
     await saveProgress(p);
   }
   async function start(e: Episode, position = e.played ? 0 : e.position) {
     const attempt = ++playbackAttempt.current;
+    setStartingStation(e.station?.id);
     if (current.current.id && current.current.id !== e.id && (remote || !audio.ended))
       void storePosition(current.current.id, current.current.pos).catch(report);
     current.current = { id: e.id, pos: position, playing: false };
@@ -318,7 +335,7 @@ export default function App() {
         } catch (error) {
           if (attempt !== playbackAttempt.current) return;
           if (!(error instanceof TypeError) && !(error instanceof DOMException && error.name === "TimeoutError")) throw error;
-          setOnline(false);
+          setServerReachable(false);
           await onPhone();
         }
       } else {
@@ -326,18 +343,20 @@ export default function App() {
       }
       if (attempt !== playbackAttempt.current) return;
       setPlaying(true);
+      if (!e.station) await storePosition(e.id, position, false, true);
     } catch (error) {
       if (attempt === playbackAttempt.current) throw error;
+    } finally {
+      if (attempt === playbackAttempt.current) setStartingStation(undefined);
     }
   }
   async function toggle() {
-    if (!episode && selected) return start(selected);
     if (!episode) return;
     if (remote && remoteUnavailable) return start(episode, episode.station ? 0 : pos);
     if (playing) {
       await player.pause();
       setPlaying(false);
-      await storePosition(id, pos);
+      await storePosition(id, remote ? pos : audio.currentTime, !remote && audio.ended);
     } else if (remote || audio.getAttribute("src")) {
       await player.resume();
       setPlaying(true);
@@ -351,6 +370,17 @@ export default function App() {
       art: station.art, description: "", date: 0, duration: 0, position: 0,
       played: 0, updated: 0, cached: "none",
     }));
+  }
+  function stationActions(station: RadioStation) {
+    setActionStation(station);
+    setModal("station-actions");
+  }
+  async function hideStation(station: RadioStation, hidden: boolean) {
+    if (hidden) {
+      haptic(24);
+      dismissModal();
+    }
+    setHiddenStations(await setStationHidden(station, hidden));
   }
   async function seek(n: number) {
     const value = Math.max(
@@ -394,6 +424,7 @@ export default function App() {
             current.current.id,
             audio.currentTime,
             audio.ended,
+            false,
           ),
         );
     };
@@ -472,13 +503,13 @@ export default function App() {
             await storePosition(current.current.id, current.current.pos, true);
           }
           setEpisodeId(e.id);
-          await storePosition(e.id, s.position);
+          await storePosition(e.id, s.position, false, s.playing);
         }
       } catch (error) {
         if (alive) {
           setPlaying(false);
           if (error instanceof TypeError || (error instanceof DOMException && error.name === "TimeoutError"))
-            setOnline(false);
+            setServerReachable(false);
           msg(
             "Speaker unavailable. Check its connection or select this device.",
           );
@@ -548,13 +579,15 @@ export default function App() {
     </div>
   );
   const readingSpeakers = useRef<AbortController | null>(null);
-  async function loadSpeakers(rescan = false) {
-    if (!navigator.onLine || (!rescan && readingSpeakers.current)) return;
+  async function loadSpeakers(action: "list" | "retry" | "scan" = "list") {
+    if (action === "list" && readingSpeakers.current) return;
     readingSpeakers.current?.abort();
     const controller = new AbortController();
     readingSpeakers.current = controller;
     const timeout = window.setTimeout(() => controller.abort(), 8000);
+    const rescan = action === "scan";
     setScanning(rescan);
+    if (action !== "list") setSpeakerError("");
     try {
       const rooms = await request<Speaker[]>(
         rescan ? "speakers/scan" : "speakers",
@@ -565,11 +598,13 @@ export default function App() {
       if (readingSpeakers.current === controller) {
         setSpeakers(rooms);
         setSpeakerError("");
+        setServerReachable(true);
       }
-    } catch {
+    } catch (error) {
       if (readingSpeakers.current === controller) {
+        if (error instanceof TypeError || controller.signal.aborted) setServerReachable(false);
         setSpeakers(undefined);
-        setSpeakerError("Couldn’t reach the server’s speaker list.");
+        setSpeakerError("Couldn’t load the speaker list from " + location.host + ". Retrying automatically.");
       }
     } finally {
       window.clearTimeout(timeout);
@@ -584,24 +619,23 @@ export default function App() {
     const fetchList = () => {
       if (!document.hidden) void loadSpeakers();
     };
-    const offline = () => {
-      readingSpeakers.current?.abort();
-      readingSpeakers.current = null;
-      setSpeakers(undefined);
-      setScanning(false);
-      setSpeakerError("Server offline.");
+    const resume = () => {
+      if (!document.hidden) void loadSpeakers("retry");
     };
-    if (navigator.onLine) fetchList();
-    else offline();
-    window.addEventListener("offline", offline);
-    window.addEventListener("online", fetchList);
-    document.addEventListener("visibilitychange", fetchList);
+    fetchList();
+    window.addEventListener("offline", resume);
+    window.addEventListener("online", resume);
+    window.addEventListener("pageshow", resume);
+    window.addEventListener("focus", fetchList);
+    document.addEventListener("visibilitychange", resume);
     const timer = window.setInterval(fetchList, 5000);
     return () => {
       window.clearInterval(timer);
-      window.removeEventListener("offline", offline);
-      window.removeEventListener("online", fetchList);
-      document.removeEventListener("visibilitychange", fetchList);
+      window.removeEventListener("offline", resume);
+      window.removeEventListener("online", resume);
+      window.removeEventListener("pageshow", resume);
+      window.removeEventListener("focus", fetchList);
+      document.removeEventListener("visibilitychange", resume);
       readingSpeakers.current?.abort();
       readingSpeakers.current = null;
     };
@@ -609,7 +643,7 @@ export default function App() {
   function devices() {
     setSpeakers(undefined);
     setScanning(false);
-    setSpeakerError(navigator.onLine ? "" : "Server offline.");
+    setSpeakerError("");
     setModal("devices");
   }
   async function save(e: Episode, manual = true) {
@@ -637,8 +671,16 @@ export default function App() {
   async function removeDownload(e: Episode) {
     haptic(24);
     await drop(e.id);
-    await put("skip:" + e.id, true);
+    setStarred(await starredEpisodes());
     await refreshDownloads();
+    if (starredIds.has(e.id) && navigator.onLine) void refresh(true);
+  }
+  async function toggleStar(e: Episode) {
+    const adding = !starredIds.has(e.id);
+    if (adding && !starred.length) void navigator.storage?.persist?.().catch(() => {});
+    await setStar({ ...e, podcastTitle: name(e) }, adding);
+    setStarred(await starredEpisodes());
+    if (navigator.onLine) void refresh(true);
   }
   async function markPodcastRead(podcastId: string) {
     const unread = lib.episodes.filter((e) => e.podcastId === podcastId && !e.played);
@@ -647,7 +689,7 @@ export default function App() {
       ...currentLib,
       episodes: currentLib.episodes.map((e) =>
         e.podcastId === podcastId && !e.played
-          ? { ...e, played: 1, updated }
+          ? withProgress(e, { id: e.id, position: e.position, played: true, updated, listenedAt: 0 })
           : e,
       ),
     }));
@@ -656,6 +698,7 @@ export default function App() {
       position: e.position,
       played: true,
       updated,
+      listenedAt: 0,
     })));
   }
   async function deletePodcast(podcastId: string) {
@@ -695,10 +738,9 @@ export default function App() {
         if (stop) return;
         if (
           e && !pendingDelete.current.has(e.podcastId) && !wanted.includes(id) &&
-          !(e?.position && !e.played) &&
-          !(await get("pin:" + id))
+          !(e.position && !e.played)
         )
-          await drop(id);
+          await drop(id, { automatic: true });
       }
       for (const key of wanted) {
         if (stop) break;
@@ -714,6 +756,22 @@ export default function App() {
       stop = true;
     };
   }, [auto, online, ready, foreground, automaticIds(lib, auto).join(",")]);
+  useEffect(() => {
+    if (!starred.length || !navigator.onLine || document.hidden) return;
+    let cancelled = false;
+    run(async () => {
+      const existing = new Set(await downloads());
+      for (const entry of starred) {
+        if (cancelled) break;
+        if (existing.has(entry.id)) continue;
+        const episode = lib.episodes.find(e => e.id === entry.id) ?? entry;
+        await save(episode, false).catch(() => {
+          // The Starred list still shows the pending download and allows a retry.
+        });
+      }
+    });
+    return () => { cancelled = true; };
+  }, [starred, online, foreground]);
   async function submit(ev: FormEvent) {
     ev.preventDefault();
     setBusy(true);
@@ -803,26 +861,60 @@ export default function App() {
     setSearchResults([]);
     setModal(m);
   };
-  const tabs = [
-    ["Episodes", AudioLines],
-    ["Podcasts", PodcastIcon],
-    ["Radio", RadioIcon],
-  ] as const;
-  const detailPodcast = lib.podcasts.find((p) => p.id === detail);
-  const titleQuery = episodeQuery.trim().toLocaleLowerCase();
-  const eps = useMemo(() => {
-    if (!detail && filter === "Downloaded") {
-      const episodes = new Map(downloaded.map(e => [e.id, e]));
-      for (const e of lib.episodes) if (saved.includes(e.id)) episodes.set(e.id, e);
-      return [...episodes.values()].sort((a, b) => b.date - a.date);
+  const podcastsById = useMemo(() => new Map(lib.podcasts.map(p => [p.id, p])), [lib.podcasts]);
+  const newCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const entry of lib.episodes) {
+      if (!entry.played && !entry.position && !lastListened(entry))
+        counts.set(entry.podcastId, (counts.get(entry.podcastId) ?? 0) + 1);
     }
-    return lib.episodes.filter((e) => {
-      if (detail) return e.podcastId === detail && e.title.toLocaleLowerCase().includes(titleQuery);
-      return filter !== "Unplayed" || !e.played;
-    });
-  }, [lib.episodes, detail, titleQuery, filter, saved, downloaded]);
-  const emptyImport = detailPodcast?.importPending ? detailPodcast
-    : tab === "Episodes" && filter !== "Downloaded" && !eps.length ? importingPodcast : undefined;
+    return counts;
+  }, [lib.episodes]);
+  const catalog = useMemo(() => {
+    const entries = new Map<string, Episode>();
+    for (const entry of [...starred, ...downloaded, ...lib.episodes]) {
+      const previous = entries.get(entry.id);
+      const progress = previous && previous.updated > entry.updated ? previous : entry;
+      entries.set(entry.id, previous
+        ? withProgress(entry, {
+          ...progress,
+          played: !!progress.played,
+          listenedAt: Math.max(lastListened(previous), lastListened(entry)),
+        })
+        : entry);
+    }
+    return entries;
+  }, [starred, downloaded, lib.episodes]);
+  const listening = useMemo(() => {
+    const history = [...catalog.values()].filter(e => lastListened(e) > 0)
+      .sort((a, b) => lastListened(b) - lastListened(a));
+    const recent = new Map<string, Episode>();
+    for (const e of history) if (!recent.has(e.podcastId)) recent.set(e.podcastId, e);
+    return {
+      unfinished: history.filter(e => !e.played),
+      recent: [...recent.values()].slice(0, 10),
+    };
+  }, [catalog]);
+  const detailPodcast = podcastsById.get(detail);
+  const titleQuery = episodeQuery.trim().toLocaleLowerCase();
+  const podcastEpisodes = detailPodcast
+    ? lib.episodes.filter(e => e.podcastId === detail && e.title.toLocaleLowerCase().includes(titleQuery))
+    : [];
+  const savedEpisodes = tab === "Saved"
+    ? [...catalog.values()].filter(e => filter === "Starred" ? starredIds.has(e.id) : saved.includes(e.id))
+      .sort((a, b) => b.date - a.date)
+    : [];
+  function openPodcast(p: Podcast) {
+    setEpisodeQuery("");
+    setPodcastId(p.id);
+    setVisibleCount(15);
+    window.scrollTo(0, 0);
+  }
+  function closePodcast() {
+    setPodcastId("");
+    setVisibleCount(15);
+    window.scrollTo(0, 0);
+  }
   function openEpisode(e: Episode) {
     setReadEpisode(e);
     setModal("episode");
@@ -835,7 +927,10 @@ export default function App() {
     setActionPodcast(p);
     setModal("podcast-actions");
   }
-  const row = (e: Episode) => (
+  const starButton = (e: Episode, compact = false) => (
+    <EpisodeStar compact={compact} starred={starredIds.has(e.id)} click={() => run(() => toggleStar(e))} />
+  );
+  const row = (e: Episode, resume = false) => (
     <article className="row" key={e.id}
       {...(saved.includes(e.id) ? rowActions(e.id, () => downloadActions(e)) : {})}>
       <button
@@ -851,11 +946,20 @@ export default function App() {
           {e.title}
         </button>
         <small>
-          {date(e.date)} <span>·</span> {minutes(e.duration)}{" "}
-          {e.played ? " · Played" : ""}
+          {resume ? e.position > 0 ? fmt(e.position) + " played" : "Started" : (
+            <>{date(e.date)} <span>·</span> {minutes(e.duration)}{e.played ? " · Played" : ""}</>
+          )}
         </small>
+        {resume && e.duration > 0 && (
+          <progress className="queue-progress" aria-label={"Progress for " + e.title}
+            value={Math.min(e.position, e.duration)} max={e.duration} />
+        )}
+        {starredIds.has(e.id) && !saved.includes(e.id) && percent[e.id] === undefined && (
+          <small>Download pending</small>
+        )}
       </div>
       <div className="actions">
+        {starButton(e, true)}
         {percent[e.id] !== undefined ? (
           <span className="icon download-progress" role="status" aria-label="Downloading">
             {percent[e.id] ? <small>{percent[e.id]}%</small> : <LoaderCircle size={18} />}
@@ -868,7 +972,7 @@ export default function App() {
         </IconButton>}
         <button
           className="round"
-          aria-label={"Play or pause " + e.title}
+          aria-label={(id === e.id && playing ? "Pause " : resume ? "Resume " : "Play ") + e.title}
           onClick={() => run(() => (id === e.id ? toggle() : start(e)))}
         >
           {id === e.id && playing ? <Pause /> : <Play />}
@@ -876,6 +980,33 @@ export default function App() {
       </div>
     </article>
   );
+  const episodeList = (episodes: Episode[], resume = false) => (
+    <>
+      <div className="listing">{episodes.slice(0, count).map(e => row(e, resume))}</div>
+      {episodes.length > count && (
+        <button className="more" onClick={() => setVisibleCount(count + 25)}>Show more episodes</button>
+      )}
+    </>
+  );
+  const podcastRow = (p: Podcast) => {
+    const count = newCounts.get(p.id) ?? 0;
+    return (
+      <SwipeActionRow key={p.id} title={p.title} options={() => podcastActions(p)} removeLabel="Unsubscribe"
+        remove={() => { setActionPodcast(p); setModal("remove"); }}>
+        <button className="subscription" onClick={() => openPodcast(p)}>
+          <Art e={p} />
+          <div>
+            <b>{p.title}</b>
+            <small>{p.importPending ? <EpisodeImportStatus podcast={p} online={online} /> : <>
+              {count ? count + (count === 1 ? " new episode" : " new episodes") : "Caught up"}
+              {p.error ? " · Refresh pending" : ""}
+            </>}</small>
+          </div>
+          <ChevronRight />
+        </button>
+      </SwipeActionRow>
+    );
+  };
   return (
     <>
       <header>
@@ -895,151 +1026,142 @@ export default function App() {
             <IconButton label="Library settings" click={() => show("settings")}>
               <Settings2 />
             </IconButton>
+            {serverReachable === true && (
+              <span className="server-dot" role="img" aria-label="Connected to home server" title="Connected to home server" />
+            )}
           </div>
         </div>
       </header>
       <main>
-        {!detail && <div className="pagehead">
-          <div className="over"><span className="tinyline" /> {profileLabel.toUpperCase()}’S LIBRARY</div>
-          <h1>{tab}</h1>
-        </div>}
         {!online && (
-          <div className="notice">
+          <div className="notice library-notice">
             <WifiOff size={16} /> Offline library
           </div>
         )}
-        {tab === "Episodes" && hero && (
-          <section className="hero">
-            <div className="herocopy">
-              <div className="heroeyebrow"><Headphones size={16} />{recent.length ? "Continue listening" : "Featured episode"}</div>
-              <h2>{hero.title}</h2>
-              <div className="herometa">{name(hero)} <span>·</span> {minutes(hero.duration)}</div>
-              {hero.position > 0 && <progress value={hero.position} max={hero.duration || hero.position} />}
-              <button className="primary" onClick={() => run(() => (id === hero.id ? toggle() : start(hero)))}>
-                {playing && id === hero.id ? <Pause /> : <Play />}
-                {playing && id === hero.id ? "Pause" : hero.position ? "Resume episode" : "Play episode"}
-              </button>
-            </div>
-            <Art e={hero} />
-          </section>
-        )}
-        {tab === "Radio" ? <Radio active={playing ? episode?.station?.id : undefined} play={playStation} /> : tab === "Podcasts" && !detail ? (
+        {detailPodcast ? (
           <>
             <div className="sectionhead">
-              <h2>Podcasts <em>{lib.podcasts.length}</em></h2>
+              <button className="secondary" onClick={closePodcast}><ArrowLeft size={18} /> {tab}</button>
+              <button className="secondary" onClick={() => podcastActions(detailPodcast)}>
+                <MoreHorizontal size={18} /> Options
+              </button>
+            </div>
+            <h1 className="podcast-title">{detailPodcast.title}</h1>
+            <label className="episode-search">
+              <Search size={18} aria-hidden="true" />
+              <input
+                type="search"
+                aria-label="Search episodes in this podcast"
+                placeholder="Search episodes by title"
+                value={episodeQuery}
+                onChange={(event) => {
+                  setEpisodeQuery(event.target.value);
+                  setVisibleCount(15);
+                }}
+              />
+            </label>
+            {podcastEpisodes.length ? episodeList(podcastEpisodes) : (
+              <p className="empty">
+                {detailPodcast.importPending ? <EpisodeImportStatus podcast={detailPodcast} online={online} />
+                  : titleQuery ? "No matching episode titles." : "No episodes here yet."}
+              </p>
+            )}
+          </>
+        ) : tab === "Podcasts" ? (
+          <>
+            <div className="sectionhead subscriptions">
+              <h1>Podcasts <em>{lib.podcasts.length}</em></h1>
               <button className="add-podcast" aria-label="Add podcast" onClick={() => show("add")}>
                 <Plus size={20} /> <span>Add podcast</span>
               </button>
             </div>
-            {lib.podcasts.map((p) => (
-              <div className="subscription-swipe" key={p.id} {...rowActions(p.id, () => podcastActions(p))}>
-                <button className="subscription" onClick={() => {
-                  setEpisodeQuery("");
-                  setPodcastId(p.id);
-                  setVisibleCount(15);
-                  window.scrollTo(0, 0);
-                }}
-                >
-                  <Art e={p} />
-                  <div>
-                    <b>{p.title}</b>
-                    <small>
-                      {p.importPending ? <EpisodeImportStatus podcast={p} online={online} /> : <>
-                        {lib.episodes.filter((e) => e.podcastId === p.id && !e.played).length} new
-                        {p.error ? " · Refresh pending" : ""}
-                      </>}
-                    </small>
+            {newCounts.size > 0 && (
+              <section className="library-group">
+                <h2>New episodes</h2>
+                {lib.podcasts.filter(p => newCounts.has(p.id)).map(podcastRow)}
+              </section>
+            )}
+            {lib.podcasts.length > newCounts.size && (
+              <section className="library-group">
+                <h2>{newCounts.size ? "Other podcasts" : "Your subscriptions"}</h2>
+                {lib.podcasts.filter(p => !newCounts.has(p.id)).map(podcastRow)}
+              </section>
+            )}
+            {!lib.podcasts.length && (
+              <p className="empty">{ready ? "Subscribed podcasts will appear here." : "Loading library…"}</p>
+            )}
+          </>
+        ) : tab === "Queue" ? (
+          <>
+            <div className="sectionhead"><h1>Queue</h1></div>
+            <section className="library-group">
+              <h2>Continue listening</h2>
+              {listening.unfinished.length ? episodeList(listening.unfinished, true)
+                : <p className="empty">Unfinished episodes will appear here.</p>}
+            </section>
+            <section className="library-group">
+              <h2>Recently listened</h2>
+              {listening.recent.length ? listening.recent.map(entry => {
+                const podcast = podcastsById.get(entry.podcastId);
+                const title = podcast?.title ?? name(entry);
+                return (
+                  <div className="subscription-swipe" key={entry.podcastId}>
+                    <button className="subscription" onClick={() => podcast ? openPodcast(podcast) : openEpisode(entry)}>
+                      <Art e={podcast ?? entry} />
+                      <div>
+                        <b>{title}</b>
+                        <small>Last listened {date(lastListened(entry))}</small>
+                      </div>
+                      <ChevronRight />
+                    </button>
                   </div>
-                  {lib.episodes.some((e) => e.podcastId === p.id && !e.played) && <i className="unread-dot" aria-label="Unread episodes" />}
-                  <ChevronRight />
-                </button>
-                <button className="row-menu" aria-label={"Options for " + p.title} onClick={() => podcastActions(p)}>
-                  <MoreHorizontal size={20} />
-                </button>
+                );
+              }) : <p className="empty">Podcasts you listen to will appear here.</p>}
+            </section>
+          </>
+        ) : tab === "Saved" ? (
+          <>
+            <div className="sectionhead">
+              <h1>Saved</h1>
+              <div className="filters">
+                {(["Starred", "Downloaded"] as const).map(option => (
+                  <button key={option} aria-pressed={filter === option} onClick={() => {
+                    setFilter(option);
+                    setVisibleCount(15);
+                  }}>{option}</button>
+                ))}
               </div>
-            ))}
+            </div>
+            {savedEpisodes.length ? episodeList(savedEpisodes) : (
+              <p className="empty">{filter === "Starred" ? "Tap the star on an episode to save it here." : "Downloaded episodes will appear here."}</p>
+            )}
           </>
         ) : (
           <>
-            <div className="sectionhead">
-              <h2>{detail ? <button onClick={() => setPodcastId("")}><ArrowLeft size={18} /> Podcasts</button> : "Latest episodes"} {!emptyImport && <em>{eps.length}</em>}</h2>
-              {detail && (
-                <button
-                  className="secondary"
-                  onClick={() => detailPodcast && podcastActions(detailPodcast)}
-                >
-                  <MoreHorizontal size={18} /> Options
-                </button>
-              )}
-              {tab === "Episodes" && (
-                <div className="filters">
-                  {["Unplayed", "All", "Downloaded"].map((f) => (
-                    <button
-                      key={f}
-                      aria-pressed={filter === f}
-                      onClick={() => {
-                        setFilter(f);
-                        setVisibleCount(15);
-                      }}
-                    >
-                      {f}
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-            {detail && (
-              <label className="episode-search">
-                <Search size={18} aria-hidden="true" />
-                <input
-                  type="search"
-                  aria-label="Search episodes in this podcast"
-                  placeholder="Search episodes by title"
-                  value={episodeQuery}
-                  onChange={(event) => {
-                    setEpisodeQuery(event.target.value);
-                    setVisibleCount(15);
-                  }}
-                />
-              </label>
-            )}
-            <div className="listing">{eps.slice(0, count).map(row)}</div>
-            {eps.length > count && (
-              <button
-                className="more"
-                onClick={() => setVisibleCount(count + 25)}
-              >
-                Show more episodes
-              </button>
-            )}
-            {!eps.length && (
-              <p className="empty">
-                {emptyImport
-                  ? <EpisodeImportStatus podcast={emptyImport} online={online} />
-                  : !ready && !lib.podcasts.length
-                  ? "Loading library…"
-                  : detail && titleQuery
-                    ? "No matching episode titles."
-                    : !detail && filter === "Downloaded"
-                      ? "Downloaded episodes will appear here."
-                      : ready && !lib.podcasts.length && online
-                        ? <button className="secondary" onClick={() => show("add")}><Plus size={16} /> Add your first podcast</button>
-                        : "No episodes here yet."}
-              </p>
-            )}
+            <div className="sectionhead"><h1>Radio</h1></div>
+            <Radio
+              active={playing ? episode?.station?.id : undefined}
+              connecting={startingStation}
+              play={playStation}
+              options={stationActions}
+              hidden={hiddenStations}
+              localPlayback={player === phone}
+              remove={station => run(() => hideStation(station, true))}
+              restore={station => run(() => hideStation(station, false))}
+            />
           </>
         )}
       </main>
       <footer>
-        {selected && (
+        {episode && (
           <div className="minibar">
             <div className="mini">
               <button className="minititle" onClick={() => setModal("player")}>
-                <Art e={selected} eager />
+                <Art e={episode} eager />
                 <div>
-                  <div className="eyebrow">{episode ? "Now playing" : "Ready to play"}</div>
-                  <b>{selected.title}</b>
-                  <small>{selected.station ? "Live radio" : name(selected)}</small>
+                  <div className="eyebrow">Now playing</div>
+                  <b>{episode.title}</b>
+                  <small>{episode.station ? "Live radio" : name(episode)}</small>
                 </div>
               </button>
               <div className="actions">
@@ -1047,16 +1169,14 @@ export default function App() {
                 <button className="round big" aria-label="Play or pause" onClick={() => run(toggle)}>{playing ? <Pause /> : <Play />}</button>
               </div>
             </div>
-            <div className="track"><i style={{ width: Math.min(100, (pos / (selected.duration || 1)) * 100) + "%" }} /></div>
+            <div className="track"><i style={{ width: Math.min(100, (pos / (episode.duration || 1)) * 100) + "%" }} /></div>
           </div>
         )}
         <nav>
           {tabs.map(([t, Icon]) => (
             <button key={t} aria-current={tab === t ? "page" : undefined} onClick={() => {
               setTab(t);
-              setPodcastId("");
-              setVisibleCount(15);
-              window.scrollTo(0, 0);
+              closePodcast();
             }}>
               <Icon size={20} />{t}
             </button>
@@ -1075,31 +1195,17 @@ export default function App() {
           onPointerDown={(event) => { backdropPressed.current = event.target === event.currentTarget; }}
           onPointerCancel={() => { backdropPressed.current = false; }}
           onClick={() => {
-            if (backdropPressed.current && modal !== "login") setModal("");
+            if (backdropPressed.current && modal !== "login") closeModal();
             backdropPressed.current = false;
           }}
         >
           <section
             className="sheet"
+            ref={modal === "player" ? playerDismiss.sheet : undefined}
             role="dialog"
             aria-modal="true"
             aria-label={modal === "player" ? "Now playing" : modal}
             onClick={(e) => e.stopPropagation()}
-            onTouchStart={(event) => {
-              dismissGesture.current = null;
-              if (modal !== "player" || event.touches.length !== 1 || event.currentTarget.scrollTop > 0
-                || (event.target as Element).closest("input, select, button")) return;
-              const touch = event.touches[0];
-              dismissGesture.current = { x: touch.clientX, y: touch.clientY };
-            }}
-            onTouchCancel={() => { dismissGesture.current = null; }}
-            onTouchEnd={(event) => {
-              const start = dismissGesture.current;
-              dismissGesture.current = null;
-              const touch = event.changedTouches[0];
-              if (modal === "player" && start && touch && touch.clientY - start.y > 72
-                && Math.abs(touch.clientX - start.x) < 55) setModal("");
-            }}
           >
             {modal === "player" && <div className="player-grabber" aria-hidden="true" />}
             <div className="sheethead">
@@ -1113,35 +1219,36 @@ export default function App() {
                     add: "Add podcast",
                     episode: "Episode details",
                     "podcast-actions": actionPodcast?.title,
+                    "station-actions": actionStation?.name,
                     "download-actions": "Downloaded episode",
                     remove: "Unsubscribe?",
                   }[modal]
                 }
               </h2>
-              <IconButton label="Close" click={() => setModal("")}>
+              <IconButton label="Close" click={closeModal}>
                 <X />
               </IconButton>
             </div>
-            {modal === "player" && selected && (
+            {modal === "player" && episode && (
               <div className="full">
-                <Art e={selected} eager />
-                <div className="eyebrow">{name(selected)}</div>
-                <h2>{selected.title}</h2>
-                {selected.station ? <div className="live-label">Live radio</div> : <>
+                <Art e={episode} eager />
+                <div className="eyebrow">{name(episode)}</div>
+                <h2>{episode.title}</h2>
+                {episode.station ? <div className="live-label">Live radio</div> : <>
                 <input
                   aria-label="Playback position"
                   type="range"
                   min="0"
-                  max={selected.duration || pos || 1}
+                  max={episode.duration || pos || 1}
                   value={pos}
                   onChange={(e) => run(() => seek(+e.target.value))}
                 />
                 <div className="time">
                   <span>{fmt(pos)}</span>
-                  <span>{fmt(selected.duration)}</span>
+                  <span>{fmt(episode.duration)}</span>
                 </div></>}
                 <div className="controls">
-                  {!selected.station && <button
+                  {!episode.station && <button
                     aria-label="Back 15 seconds"
                     onClick={() => run(() => seek(pos - 15))}
                   >
@@ -1155,7 +1262,7 @@ export default function App() {
                   >
                     {playing ? <Pause /> : <Play />}
                   </button>
-                  {!selected.station && <button
+                  {!episode.station && <button
                     aria-label="Forward 30 seconds"
                     onClick={() => run(() => seek(pos + 30))}
                   >
@@ -1164,7 +1271,7 @@ export default function App() {
                   </button>}
                 </div>
                 <div className="controls">
-                  {!selected.station && player === phone && (
+                  {!episode.station && player === phone && (
                     <select
                       aria-label="Playback speed"
                       value={speed}
@@ -1184,9 +1291,10 @@ export default function App() {
                     <Cast size={16} />
                     {deviceLabel}
                   </button>
+                  {!episode.station && starButton(episode)}
                 </div>
                 {volumeControls}
-                <p>{selected.description}</p>
+                <p>{episode.description}</p>
               </div>
             )}
             {modal === "episode" && readEpisode && (
@@ -1195,9 +1303,12 @@ export default function App() {
                   <Art e={readEpisode} eager />
                   <div><div className="eyebrow">{name(readEpisode)}</div><h3>{readEpisode.title}</h3></div>
                 </div>
-                <button className="primary" onClick={() => run(() => id === readEpisode.id ? toggle() : start(readEpisode))}>
-                  {id === readEpisode.id && playing ? <><Pause /> Pause</> : <><Play /> Play episode</>}
-                </button>
+                <div className="episode-sheet-actions">
+                  <button className="primary" onClick={() => run(() => id === readEpisode.id ? toggle() : start(readEpisode))}>
+                    {id === readEpisode.id && playing ? <><Pause /> Pause</> : <><Play /> Play episode</>}
+                  </button>
+                  {starButton(readEpisode)}
+                </div>
                 <EpisodeDetails key={readEpisode.id} episode={readEpisode} />
               </>
             )}
@@ -1264,6 +1375,13 @@ export default function App() {
                 <button className="option destructive" onClick={() => setModal("remove")}><Trash2 /> Unsubscribe</button>
               </div>
             )}
+            {modal === "station-actions" && actionStation && (
+              <div className="sheet-actions">
+                <button className="option destructive" onClick={() => run(() => hideStation(actionStation, true))}>
+                  <Trash2 /> Remove station
+                </button>
+              </div>
+            )}
             {modal === "remove" && actionPodcast && (
               <>
                 <p className="sheet-copy">Stop following <strong>{actionPodcast.title}</strong>? Saved episodes stay in Downloads.</p>
@@ -1281,7 +1399,7 @@ export default function App() {
                   <button className="destructive confirm-delete" onClick={() => {
                     setModal("");
                     run(() => removeDownload(actionEpisode));
-                  }}>Delete download</button>
+                  }}>{starredIds.has(actionEpisode.id) ? "Unstar and delete download" : "Delete download"}</button>
                 </div>
               </>
             )}
@@ -1310,12 +1428,17 @@ export default function App() {
                 {speakers && <button
                   className="secondary"
                   disabled={scanning}
-                  onClick={() => void loadSpeakers(true)}
+                  onClick={() => void loadSpeakers("scan")}
                 >
                   <RefreshCw size={16} />
                   {scanning ? "Scanning…" : "Scan for speakers"}
                 </button>}
-                {speakerError && <p role="alert">{speakerError}</p>}
+                {speakerError && <>
+                  <p role="alert">{speakerError}</p>
+                  <button className="secondary" onClick={() => void loadSpeakers("retry")}>
+                    <RefreshCw size={16} /> Retry speaker list
+                  </button>
+                </>}
                 {!speakerError && !speakers && !scanning && <p>Loading speakers…</p>}
                 {!speakerError && !scanning && speakers?.length === 0 && (
                   <p>No Sonos speakers found on the server’s network.</p>

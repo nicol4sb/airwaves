@@ -19,9 +19,15 @@ export interface Episode {
   position: number;
   played: number;
   updated: number;
+  listenedAt?: number;
   cached: string;
   transcript?: TranscriptSource | null;
   station?: RadioStation;
+}
+export interface StarChange {
+  id: string;
+  updated: number;
+  episode: Episode | null;
 }
 export interface TranscriptSource {
   url: string;
@@ -38,6 +44,7 @@ export interface Library {
   podcasts: Podcast[];
   episodes: Episode[];
   queue: string[];
+  stars?: StarChange[];
 }
 export interface Speaker {
   id: string;

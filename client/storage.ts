@@ -1,10 +1,27 @@
 import { openDB } from "idb";
-import type { Library, Episode } from "../shared/types";
+import type { Library, Episode, RadioStation, StarChange } from "../shared/types";
+import { lastListened, withProgress, type Progress } from "./listening";
 import { apiPath, profile } from "./profile";
+type LocalStar = StarChange & { pending: boolean };
+
 // Nic keeps the original store, including downloads and unsynced progress.
-const db = openDB(profile === "nic" ? "airwave" : "airwave-" + profile, 1, {
-  upgrade(db) {
-    for (const key of ["meta", "audio", "progress"]) db.createObjectStore(key);
+const db = openDB(profile === "nic" ? "airwave" : "airwave-" + profile, 2, {
+  async upgrade(db, oldVersion, _newVersion, tx) {
+    if (oldVersion === 0)
+      for (const key of ["meta", "audio", "progress"]) db.createObjectStore(key);
+    const stars = db.createObjectStore("stars", { keyPath: "id" });
+    if (oldVersion === 1) {
+      const meta = tx.objectStore("meta");
+      try {
+        const entries: Episode[] = (await meta.get("starred")) ?? [];
+        for (const episode of entries) {
+          await stars.put({ id: episode.id, episode, updated: 0, pending: true } satisfies LocalStar);
+        }
+        await meta.delete("starred");
+      } catch {
+        tx.abort();
+      }
+    }
   },
 });
 export async function get<T>(key: string): Promise<T | undefined> {
@@ -12,6 +29,15 @@ export async function get<T>(key: string): Promise<T | undefined> {
 }
 export async function put(key: string, value: unknown) {
   await (await db).put("meta", value, key);
+}
+export async function setStationHidden(station: RadioStation, hidden: boolean): Promise<RadioStation[]> {
+  const tx = (await db).transaction("meta", "readwrite");
+  const stations: RadioStation[] = (await tx.store.get("hidden-stations")) ?? [];
+  const next = stations.filter(entry => entry.id !== station.id);
+  if (hidden) next.push(station);
+  await tx.store.put(next, "hidden-stations");
+  await tx.done;
+  return next;
 }
 export async function request<T>(
   path: string,
@@ -34,19 +60,20 @@ export async function request<T>(
   }
   return res.json();
 }
-export type Progress = {
-  id: string;
-  position: number;
-  played: boolean;
-  updated: number;
-};
 export async function saveProgress(p: Progress) {
-  const tx = (await db).transaction(["meta", "progress"], "readwrite");
+  const tx = (await db).transaction(["meta", "progress", "stars"], "readwrite");
   const meta = tx.objectStore("meta");
+  const progress = tx.objectStore("progress");
+  const stars = tx.objectStore("stars");
   const saved: Episode | undefined = await meta.get("saved:" + p.id);
-  if (saved && p.updated >= saved.updated)
-    await meta.put({ ...saved, position: p.position, updated: p.updated, played: +p.played }, "saved:" + p.id);
-  await tx.objectStore("progress").put(p, p.id);
+  if (saved) await meta.put(withProgress(saved, p), "saved:" + p.id);
+  const star: LocalStar | undefined = await stars.get(p.id);
+  if (star?.episode) await stars.put({ ...star, episode: withProgress(star.episode, p) });
+  const previous: Progress | undefined = await progress.get(p.id);
+  await progress.put(previous ? {
+    ...(previous.updated > p.updated ? previous : p),
+    listenedAt: Math.max(lastListened(previous), lastListened(p)),
+  } : p, p.id);
   await tx.done;
 }
 export async function rememberDownloads(episodes: Episode[], podcasts: Library["podcasts"]) {
@@ -67,15 +94,26 @@ export async function downloadedEpisodes(ids: string[]): Promise<Episode[]> {
   const entries = await Promise.all(ids.map(id => get<Episode>("saved:" + id)));
   return entries.filter((episode): episode is Episode => !!episode);
 }
+export async function starredEpisodes(): Promise<Episode[]> {
+  const stars: LocalStar[] = await (await db).getAll("stars");
+  return stars.flatMap(({ episode }) => episode ? [episode] : []);
+}
+function starChange(id: string, episode: Episode | null, previous?: LocalStar): LocalStar {
+  return { id, episode, updated: Math.max(Date.now(), (previous?.updated ?? 0) + 1), pending: true };
+}
+export async function setStar(episode: Episode, starred: boolean) {
+  const tx = (await db).transaction("stars", "readwrite");
+  const previous: LocalStar | undefined = await tx.store.get(episode.id);
+  await tx.store.put(starChange(episode.id, starred ? episode : null, previous));
+  await tx.done;
+}
 export function mergeProgress(lib: Library, items: Progress[]): Library {
   const pending = new Map(items.map((p) => [p.id, p]));
   return {
     ...lib,
     episodes: lib.episodes.map((e) => {
       const p = pending.get(e.id);
-      return p && p.updated >= e.updated
-        ? { ...e, position: p.position, played: +p.played, updated: p.updated }
-        : e;
+      return p ? withProgress(e, p) : e;
     }),
   };
 }
@@ -96,17 +134,55 @@ async function synchronize() {
   for (const p of pending) {
     await request("progress/" + p.id, "PUT", p);
   }
-  const fresh = await request<Library>("library");
+  const { stars, ...fresh } = await request<Library>("library");
   const previous = await localLibrary();
   if (previous) await rememberDownloads(previous.episodes, previous.podcasts);
   const tx = d.transaction(["meta", "progress"], "readwrite");
   await tx.objectStore("meta").put(fresh, "library");
   for (const p of pending) {
     const s = tx.objectStore("progress");
-    if ((await s.get(p.id))?.updated === p.updated) await s.delete(p.id);
+    const current: Progress | undefined = await s.get(p.id);
+    if (current?.updated === p.updated && current.position === p.position &&
+      current.played === p.played && current.listenedAt === p.listenedAt) await s.delete(p.id);
   }
   await tx.done;
+  if (stars) await synchronizeStars(stars);
   return (await localLibrary())!;
+}
+async function synchronizeStars(remote: StarChange[]) {
+  const d = await db;
+  const changes = new Map(remote.map(entry => [entry.id, entry]));
+  const sent = new Map<string, number>();
+  const local: LocalStar[] = await d.getAll("stars");
+  for (const change of local) {
+    if (!change.pending) continue;
+    const { id, updated, episode } = change;
+    try {
+      const confirmed = await request<StarChange>("stars/" + encodeURIComponent(id), "PUT", {
+        updated,
+        episode: episode && {
+          ...episode, description: episode.description.slice(0, 4000), title: episode.title.slice(0, 500),
+          podcastTitle: episode.podcastTitle?.slice(0, 300),
+        },
+      });
+      changes.set(id, confirmed);
+      sent.set(id, updated);
+    } catch {
+      // Keep unacknowledged changes for the next sync.
+      break;
+    }
+  }
+  const tx = d.transaction("stars", "readwrite");
+  for (const change of changes.values()) {
+    const existing: LocalStar | undefined = await tx.store.get(change.id);
+    if (existing && (existing.updated > change.updated ||
+      (existing.pending && sent.get(change.id) !== existing.updated))) continue;
+    const snapshot = existing?.updated === change.updated && existing.episode && change.episode
+      ? withProgress(existing.episode, { ...change.episode, played: !!change.episode.played })
+      : change.episode;
+    await tx.store.put({ ...change, episode: snapshot, pending: false } satisfies LocalStar);
+  }
+  await tx.done;
 }
 const localAudioURLs = new Map<string, string>();
 export function localAudioURL(id: string) {
@@ -129,10 +205,22 @@ export async function downloads(): Promise<string[]> {
   }));
   return keys;
 }
-export async function drop(id: string) {
-  const tx = (await db).transaction(["audio", "meta"], "readwrite");
+export async function drop(id: string, { automatic = false } = {}) {
+  const tx = (await db).transaction(["audio", "meta", "stars"], "readwrite");
+  const meta = tx.objectStore("meta");
+  const stars = tx.objectStore("stars");
+  const starred: LocalStar | undefined = await stars.get(id);
+  if (automatic && (starred?.episode || await meta.get("pin:" + id))) {
+    await tx.done;
+    return;
+  }
   await tx.objectStore("audio").delete(id);
-  await tx.objectStore("meta").delete("saved:" + id);
+  await meta.delete("saved:" + id);
+  if (!automatic) {
+    if (starred?.episode) await stars.put(starChange(id, null, starred));
+    await meta.delete("pin:" + id);
+    await meta.put(true, "skip:" + id);
+  }
   await tx.done;
   const url = localAudioURLs.get(id);
   if (url) URL.revokeObjectURL(url);
