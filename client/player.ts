@@ -10,38 +10,53 @@ export interface Playback {
 export const audio = new Audio();
 audio.preload = "metadata";
 class Phone implements Playback {
-  private objectURL = "";
-  async play(e: Episode, position: number) {
-    if (this.objectURL) URL.revokeObjectURL(this.objectURL);
-    this.objectURL = "";
-    const offlineURL = localAudioURL(e.id);
-    if (!offlineURL && !navigator.onLine)
-      throw Error("This episode is not downloaded to this phone.");
-    if (offlineURL) {
-      await this.playURL(offlineURL, position);
-      return;
+  private attempt?: AbortController;
+  async play(e: Episode, position: number, serverAvailable = true) {
+    this.attempt?.abort();
+    const controller = new AbortController();
+    this.attempt = controller;
+    const local = localAudioURL(e.id);
+    if (!local && !navigator.onLine) {
+      throw Error(e.station ? "Live radio needs an internet connection." : "This episode is not downloaded to this device.");
     }
+    const sources = local ? [local] : [e.audio];
+    if (!local && !e.station && serverAvailable && e.cached === "ready")
+      sources.push(apiPath("audio/" + e.id));
 
-    // Prefer the Pi's cached copy when it is reachable. If the server is down
-    // or away from home, stream directly from the publisher URL saved in the
-    // local library.
-    if (e.cached === "ready") {
+    let failure: unknown;
+    for (const source of sources) {
       try {
-        await this.playURL(apiPath("audio/" + e.id), position);
+        await this.playURL(source, position, controller.signal);
         return;
-      } catch {
-        // A failed server request can leave the media element in an error state.
+      } catch (error) {
+        if (controller.signal.aborted || (error instanceof DOMException && error.name === "NotAllowedError"))
+          throw error;
+        failure = error;
         audio.pause();
         audio.removeAttribute("src");
         audio.load();
       }
     }
-    await this.playURL(e.audio, position);
+    throw failure ?? Error("No audio source available");
   }
-  private async playURL(src: string, position: number) {
+  private async playURL(src: string, position: number, signal: AbortSignal) {
     audio.src = src;
-    audio.currentTime = position;
-    await audio.play();
+    if (position > 0) audio.currentTime = position;
+    const pending = audio.play();
+    const deadline = AbortSignal.any([signal, AbortSignal.timeout(8000)]);
+    let onAbort: () => void = () => {};
+    try {
+      await Promise.race([
+        pending,
+        new Promise<never>((_, reject) => {
+          onAbort = () => reject(deadline.reason);
+          if (deadline.aborted) onAbort();
+          else deadline.addEventListener("abort", onAbort, { once: true });
+        }),
+      ]);
+    } finally {
+      deadline.removeEventListener("abort", onAbort);
+    }
   }
   async pause() {
     audio.pause();
@@ -68,6 +83,8 @@ export class Remote implements Playback {
     });
   }
   play(e: Episode, position: number) {
+    if (e.station)
+      return request<void>("speakers/" + this.speaker.id, "POST", { action: "radio", stationId: e.station.id });
     return this.command("start", position, [e.id]);
   }
   pause() {

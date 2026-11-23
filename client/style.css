@@ -479,19 +479,6 @@ small span {
   -webkit-touch-callout: none;
   user-select: none;
 }
-.row.swiped .actions > .icon {
-  display: none;
-}
-.episode-delete {
-  display: flex;
-  flex: none;
-  align-items: center;
-  gap: 7px;
-  padding: 0 13px;
-  border-radius: 9px;
-  background: #a83e4b;
-  color: white;
-}
 .artplay {
   padding: 0;
   border-radius: 9px;
@@ -566,15 +553,15 @@ small span {
 }
 .subscription-swipe {
   display: flex;
-  align-items: stretch;
-  overflow: hidden;
+  align-items: center;
+  gap: 6px;
   border-radius: 12px;
   margin: 8px 0;
   touch-action: pan-y;
   -webkit-touch-callout: none;
   user-select: none;
 }
-.subscription-swipe.swiped .subscription {
+.subscription {
   min-width: 55%;
 }
 .subscription {
@@ -589,28 +576,6 @@ small span {
   border-radius: 12px;
   text-align: left;
   margin: 0;
-}
-.subscription-actions {
-  display: flex;
-  flex-direction: column;
-  justify-content: stretch;
-  gap: 4px;
-  margin-left: 8px;
-}
-.subscription-actions button {
-  display: flex;
-  flex: 1;
-  align-items: center;
-  justify-content: center;
-  gap: 7px;
-  min-width: 116px;
-  border-radius: 9px;
-  background: #a83e4b;
-  color: white;
-  font-size: 12px;
-}
-.subscription-actions button + button {
-  background: #514366;
 }
 .unread-dot {
   width: 9px;
@@ -733,6 +698,7 @@ nav button[aria-current] {
   width: 100%;
   max-height: 90dvh;
   overflow: auto;
+  overscroll-behavior: contain;
   border-radius: 22px;
   padding: 24px;
   background: #242127;
@@ -1039,4 +1005,60 @@ nav button[aria-current] {
   .toast {
     bottom: calc(144px + env(safe-area-inset-bottom));
   }
+}
+
+
+.row-menu {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  min-height: 44px;
+  flex: none;
+  border-radius: 12px;
+  color: var(--sub);
+}
+.row-menu:hover, .radio-row:hover { background: var(--panel); color: var(--text); }
+.sheet-copy { margin: 8px 0 20px; color: var(--sub); line-height: 1.5; }
+.sheet-copy strong { color: var(--text); }
+.sheet-actions { display: grid; gap: 8px; }
+.confirm-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 10px; }
+.sheet .destructive { color: #ffc0c6; background: #4d292f; }
+.sheet .destructive:hover { background: #65323c; }
+.confirm-delete { min-height: 44px; padding: 8px 14px; border-radius: 10px; font-weight: 650; }
+.player-grabber {
+  display: grid;
+  place-items: center;
+  min-height: 20px;
+  margin: -12px 0 8px;
+  touch-action: none;
+}
+.player-grabber::before {
+  content: "";
+  width: 38px;
+  height: 4px;
+  border-radius: 4px;
+  background: var(--sub);
+}
+.episode-sheet-title { display: flex; align-items: center; gap: 12px; margin: 0 0 16px; }
+.episode-sheet-title .art { flex: none; }
+.episode-sheet-title h3 { margin: 4px 0 0; }
+.episode-details { margin-top: 20px; line-height: 1.58; overflow-wrap: anywhere; }
+.episode-details p { color: var(--sub); }
+.transcript { white-space: pre-wrap; }
+.radio-row {
+  display: flex;
+  align-items: center;
+  gap: 15px;
+  text-align: left;
+  width: 100%;
+  padding: 12px;
+  border-radius: 10px;
+}
+.radio-row span { flex: 1; }
+.radio-row small { display: block; margin-top: 3px; color: var(--sub); }
+.radio-row > svg, .live-label { color: var(--accent); }
+.live-label { font-weight: 600; margin-block: 12px; }
+.download-progress svg { animation: episode-import-spin 900ms linear infinite; }
+@media (prefers-reduced-motion: reduce) {
+  .download-progress svg { animation: none; }
 }

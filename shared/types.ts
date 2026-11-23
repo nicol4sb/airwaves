@@ -9,6 +9,7 @@ export interface Podcast {
 export interface Episode {
   id: string;
   podcastId: string;
+  podcastTitle?: string;
   title: string;
   audio: string;
   art: string;
@@ -19,6 +20,19 @@ export interface Episode {
   played: number;
   updated: number;
   cached: string;
+  transcript?: TranscriptSource | null;
+  station?: RadioStation;
+}
+export interface TranscriptSource {
+  url: string;
+  type: string;
+}
+export interface RadioStation {
+  id: string;
+  name: string;
+  url: string;
+  art: string;
+  group: string;
 }
 export interface Library {
   podcasts: Podcast[];

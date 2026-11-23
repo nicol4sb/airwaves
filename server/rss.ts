@@ -9,6 +9,7 @@ const parser = new XMLParser({
   parseTagValue: false,
   isArray: (name) => name === "item",
 });
+const transcriptTypes = ["text/plain", "text/vtt", "application/x-subrip", "application/json", "text/html"];
 const str = (v: unknown): string =>
   typeof v === "string"
     ? v
@@ -50,6 +51,11 @@ export function parseFeed(xml: string, feed: string) {
       );
     const audio = url(enc?.["@_url"], feed);
     if (!audio) return [];
+    const transcripts = [item["podcast:transcript"]].flat().flatMap((entry) => {
+      const link = url(entry?.["@_url"], feed);
+      const type = String(entry?.["@_type"] ?? "").split(";")[0].toLowerCase();
+      return link && transcriptTypes.includes(type) ? [{ url: link, type }] : [];
+    });
     const time = str(item["itunes:duration"])
       .split(":")
       .reduce((t, v) => t * 60 + Number(v), 0);
@@ -59,6 +65,7 @@ export function parseFeed(xml: string, feed: string) {
         podcastId: id,
         title: str(item.title) || "Untitled episode",
         audio,
+        transcript: transcripts.find((entry) => entry.type !== "text/html") ?? transcripts[0] ?? null,
         art:
           artwork(
             item["media:thumbnail"]?.["@_url"] ||

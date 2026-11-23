@@ -32,8 +32,10 @@ import {
   WifiOff,
   LoaderCircle,
   Trash2,
+  MoreHorizontal,
+  Radio as RadioIcon,
 } from "lucide-react";
-import type { Library, Episode, Speaker, Podcast } from "../shared/types";
+import type { Library, Episode, Speaker, Podcast, RadioStation } from "../shared/types";
 import {
   automaticIds,
   download,
@@ -41,13 +43,17 @@ import {
   drop,
   get,
   localLibrary,
-  loadDownloadedAudio,
+  downloadedEpisodes,
+  rememberDownloads,
   put,
   request,
   saveProgress,
   sync,
 } from "./storage";
 import { audio, phone, Remote } from "./player";
+import Radio from "./Radio";
+import EpisodeDetails from "./EpisodeDetails";
+import { haptic, useRowActions } from "./rowActions";
 import { profileLabel } from "./profile";
 const empty: Library = { episodes: [], podcasts: [], queue: [] };
 type PodcastSearchResult = { id: string; title: string; url: string; author: string; image: string };
@@ -84,16 +90,21 @@ function IconButton({
     </button>
   );
 }
-function Art({ e }: { e: { art: string; title: string } }) {
+function Art({ e, eager = false }: { e: { art: string; title: string }; eager?: boolean }) {
   return (
     <span className="art">
       <Disc3 />
       {e.art && (
         <img
+          key={e.art}
           src={e.art}
           alt=""
-          loading="lazy"
-          onError={(x) => (x.currentTarget.hidden = true)}
+          loading={eager ? "eager" : "lazy"}
+          onError={(event) => {
+            const image = event.currentTarget;
+            image.hidden = true;
+            navigator.serviceWorker?.controller?.postMessage({ failedArtwork: image.src });
+          }}
         />
       )}
     </span>
@@ -168,38 +179,54 @@ export default function App() {
     [volume, setVolume] = useState<number>();
   const volumeTarget = useRef<Remote | null>(null);
   const [foreground, setForeground] = useState(0);
-  const [swipedPodcast, setSwipedPodcast] = useState("");
-  const [swipedEpisode, setSwipedEpisode] = useState("");
+  const [downloaded, setDownloaded] = useState<Episode[]>([]);
+  const [activeEpisode, setActiveEpisode] = useState<Episode>();
+  const [readEpisode, setReadEpisode] = useState<Episode>();
+  const [actionPodcast, setActionPodcast] = useState<Podcast>();
+  const [actionEpisode, setActionEpisode] = useState<Episode>();
+  const rowActions = useRowActions();
+  const dismissGesture = useRef<{ x: number; y: number } | null>(null);
+  const backdropPressed = useRef(false);
+  const playbackAttempt = useRef(0);
+  const pendingDelete = useRef(new Set<string>());
   const running = useRef(new Set<string>()),
-    podcastPress = useRef(new Map<string, number>()),
-    podcastGesture = useRef(new Map<string, { x: number; y: number }>()),
-    ignorePodcastClick = useRef(new Set<string>()),
-    episodePress = useRef(new Map<string, number>()),
-    episodeGesture = useRef(new Map<string, { x: number; y: number }>()),
-    ignoreEpisodeClick = useRef(new Set<string>()),
     last = useRef(0),
     current = useRef({ id: "", pos: 0, playing: false }),
-    searchRequest = useRef(0),
-    player = remote ?? phone;
+    searchRequest = useRef(0);
   const pickerOpen = modal === "devices";
-  const remoteUnavailable = !online || (pickerOpen && !!speakerError);
-  const deviceLabel = remote ? (remoteUnavailable ? "Playback device" : remote.speaker.name) : "This device";
-  const episode = lib.episodes.find((e) => e.id === id),
+  const remoteUnavailable = !online || !!speakerError;
+  const player = remoteUnavailable ? phone : remote ?? phone;
+  const deviceLabel = remote && !remoteUnavailable ? remote.speaker.name : "This device";
+  const episode = lib.episodes.find((e) => e.id === id)
+    ?? downloaded.find((e) => e.id === id)
+    ?? (activeEpisode?.id === id ? activeEpisode : undefined),
     recent = [...lib.episodes]
       .filter((e) => e.position > 0 && !e.played)
       .sort((a, b) => b.updated - a.updated);
   const hero = recent[0] ?? lib.episodes[0],
     selected = episode ?? hero,
     name = (e: Episode) =>
-      lib.podcasts.find((p) => p.id === e.podcastId)?.title ?? "Podcast";
+      e.station?.group || lib.podcasts.find((p) => p.id === e.podcastId)?.title || e.podcastTitle || "Podcast";
   const report = (e: unknown) =>
     msg(e instanceof Error ? e.message : String(e));
   const run = (fn: () => Promise<unknown>) => {
     void fn().catch(report);
   };
-  async function refresh() {
+  async function refreshDownloads() {
+    const ids = await downloads();
+    setSaved(ids);
+    setDownloaded(await downloadedEpisodes(ids));
+  }
+  async function refresh(afterMutation = false) {
     try {
-      setLib(await sync());
+      const fresh = await sync(afterMutation);
+      const removed = pendingDelete.current;
+      setLib(removed.size ? {
+        ...fresh,
+        podcasts: fresh.podcasts.filter(podcast => !removed.has(podcast.id)),
+        episodes: fresh.episodes.filter(episode => !removed.has(episode.podcastId)),
+      } : fresh);
+      await refreshDownloads();
       setOnline(true);
     } catch (e) {
       setOnline(false);
@@ -225,9 +252,10 @@ export default function App() {
     window.addEventListener("online", wake);
     window.addEventListener("offline", lost);
     run(async () => {
-      setLib((await localLibrary()) ?? empty);
-      setSaved(await downloads());
-      await loadDownloadedAudio();
+      const initial = (await localLibrary()) ?? empty;
+      setLib(initial);
+      await rememberDownloads(initial.episodes, initial.podcasts);
+      await refreshDownloads();
       setAutoCount((await get<number>("auto")) ?? 0);
       await refresh();
     });
@@ -255,7 +283,7 @@ export default function App() {
     return () => clearTimeout(t);
   }, [message]);
   async function storePosition(key: string, value: number, ended = false) {
-    if (!key || !Number.isFinite(value)) return;
+    if (!key || key.startsWith("radio:") || !Number.isFinite(value)) return;
     const p = { id: key, position: value, updated: Date.now(), played: ended };
     setLib((l) => ({
       ...l,
@@ -263,30 +291,66 @@ export default function App() {
         e.id === key ? { ...e, ...p, played: +ended } : e,
       ),
     }));
+    setDownloaded(episodes => episodes.map(e => e.id === key ? { ...e, ...p, played: +ended } : e));
     await saveProgress(p);
   }
   async function start(e: Episode, position = e.played ? 0 : e.position) {
+    const attempt = ++playbackAttempt.current;
     if (current.current.id && current.current.id !== e.id && (remote || !audio.ended))
       void storePosition(current.current.id, current.current.pos).catch(report);
     current.current = { id: e.id, pos: position, playing: false };
+    setActiveEpisode(e);
     setEpisodeId(e.id);
     setPosition(position);
     setPlaying(false);
-    await player.play(e, position);
-    setPlaying(true);
-    if (!remote) audio.playbackRate = speed;
+    async function onPhone() {
+      if (remote) {
+        volumeTarget.current = null;
+        setRemote(null);
+      }
+      await phone.play(e, position, online);
+      if (attempt === playbackAttempt.current) audio.playbackRate = e.station ? 1 : speed;
+    }
+    try {
+      if (remote && !remoteUnavailable) {
+        try {
+          await remote.play(e, position);
+        } catch (error) {
+          if (attempt !== playbackAttempt.current) return;
+          if (!(error instanceof TypeError) && !(error instanceof DOMException && error.name === "TimeoutError")) throw error;
+          setOnline(false);
+          await onPhone();
+        }
+      } else {
+        await onPhone();
+      }
+      if (attempt !== playbackAttempt.current) return;
+      setPlaying(true);
+    } catch (error) {
+      if (attempt === playbackAttempt.current) throw error;
+    }
   }
   async function toggle() {
     if (!episode && selected) return start(selected);
     if (!episode) return;
+    if (remote && remoteUnavailable) return start(episode, episode.station ? 0 : pos);
     if (playing) {
       await player.pause();
       setPlaying(false);
       await storePosition(id, pos);
-    } else if (remote || audio.src) {
+    } else if (remote || audio.getAttribute("src")) {
       await player.resume();
       setPlaying(true);
     } else await start(episode);
+  }
+  function playStation(station: RadioStation) {
+    const key = "radio:" + station.id;
+    if (id === key) return run(toggle);
+    run(() => start({
+      id: key, station, podcastId: "", title: station.name, audio: station.url,
+      art: station.art, description: "", date: 0, duration: 0, position: 0,
+      played: 0, updated: 0, cached: "none",
+    }));
   }
   async function seek(n: number) {
     const value = Math.max(
@@ -304,6 +368,7 @@ export default function App() {
   useEffect(() => {
     if (remote) return;
     const tick = () => {
+      if (current.current.id.startsWith("radio:")) return;
       const n = audio.currentTime;
       setPosition(n);
       current.current.pos = n;
@@ -368,6 +433,11 @@ export default function App() {
         run(() => handlers.current.seek(audio.currentTime + 30)),
       seekto: (d) => run(() => handlers.current.seek(d.seekTime ?? 0)),
     };
+    if (episode.station) {
+      delete actions.seekbackward;
+      delete actions.seekforward;
+      delete actions.seekto;
+    }
     for (const [a, fn] of Object.entries(actions))
       try {
         navigator.mediaSession.setActionHandler(a as MediaSessionAction, fn);
@@ -395,6 +465,7 @@ export default function App() {
         setPosition(s.position);
         setPlaying(s.playing);
         setVolume(remote.volumeLevel);
+        if (!current.current.id || current.current.id.startsWith("radio:")) return;
         const e = lib.episodes.find((e) => e.audio === s.audio);
         if (e) {
           if (current.current.id && current.current.id !== e.id) {
@@ -403,9 +474,11 @@ export default function App() {
           setEpisodeId(e.id);
           await storePosition(e.id, s.position);
         }
-      } catch {
+      } catch (error) {
         if (alive) {
           setPlaying(false);
+          if (error instanceof TypeError || (error instanceof DOMException && error.name === "TimeoutError"))
+            setOnline(false);
           msg(
             "Speaker unavailable. Check its connection or select this device.",
           );
@@ -422,25 +495,21 @@ export default function App() {
     };
   }, [remote, remoteUnavailable]);
   async function choose(s?: Speaker) {
-    if (s && s.id === remote?.speaker.id) {
+    if (s && s.id === remote?.speaker.id && !remoteUnavailable) {
       setModal("");
       return;
     }
     const target = s ? new Remote(s) : null;
-    if (episode) {
-      let offset = audio.currentTime;
-      if (remote) {
-        offset = pos;
-        if (!remoteUnavailable)
-          offset = await remote.status().then((status) => status.position).catch(() => pos);
-      }
+    if (episode && playing) {
+      const offset = episode.station ? 0 : remote ? pos : audio.currentTime;
       if (target) {
         await target.play(episode, offset);
-        await player.pause();
+        if (player !== target) await player.pause().catch(report);
       } else {
-        if (!remoteUnavailable)
-          await player.pause().catch(() => msg("Speaker unreachable. It may still be playing."));
-        await phone.play(episode, offset);
+        const local = phone.play(episode, offset, online);
+        if (remote && !remoteUnavailable) void remote.pause().catch(report);
+        await local;
+        audio.playbackRate = episode.station ? 1 : speed;
       }
       setPlaying(true);
     }
@@ -549,11 +618,12 @@ export default function App() {
     setDownloadProgress((p) => ({ ...p, [e.id]: 0 }));
     try {
       await download(
-        e,
+        { ...e, podcastTitle: name(e) },
         (n) => setDownloadProgress((p) => ({ ...p, [e.id]: n })),
         manual,
+        online,
       );
-      setSaved(await downloads());
+      await refreshDownloads();
       if (manual) msg("Downloaded to this device");
     } finally {
       running.current.delete(e.id);
@@ -565,9 +635,10 @@ export default function App() {
     }
   }
   async function removeDownload(e: Episode) {
+    haptic(24);
     await drop(e.id);
     await put("skip:" + e.id, true);
-    setSaved(await downloads());
+    await refreshDownloads();
   }
   async function markPodcastRead(podcastId: string) {
     const unread = lib.episodes.filter((e) => e.podcastId === podcastId && !e.played);
@@ -588,6 +659,9 @@ export default function App() {
     })));
   }
   async function deletePodcast(podcastId: string) {
+    if (pendingDelete.current.has(podcastId)) return;
+    pendingDelete.current.add(podcastId);
+    haptic(24);
     const previous = lib;
     const next = {
       ...lib,
@@ -597,15 +671,17 @@ export default function App() {
     setLib(next);
     setPodcastId("");
     setModal("");
-    setSwipedPodcast("");
-    await put("library", next);
     try {
+      await rememberDownloads(previous.episodes.filter(e => e.podcastId === podcastId), previous.podcasts);
+      await put("library", next);
       await request("podcasts/" + podcastId, "DELETE");
-      void refresh();
+      await refresh(true);
     } catch (error) {
       setLib(previous);
       await put("library", previous);
       report(error);
+    } finally {
+      pendingDelete.current.delete(podcastId);
     }
   }
   useEffect(() => {
@@ -616,8 +692,9 @@ export default function App() {
       const existing = await downloads();
       for (const id of existing) {
         const e = lib.episodes.find((e) => e.id === id);
+        if (stop) return;
         if (
-          !wanted.includes(id) &&
+          e && !pendingDelete.current.has(e.podcastId) && !wanted.includes(id) &&
           !(e?.position && !e.played) &&
           !(await get("pin:" + id))
         )
@@ -631,7 +708,7 @@ export default function App() {
             false,
           );
       }
-      if (!stop) setSaved(await downloads());
+      if (!stop) await refreshDownloads();
     });
     return () => {
       stop = true;
@@ -729,73 +806,48 @@ export default function App() {
   const tabs = [
     ["Episodes", AudioLines],
     ["Podcasts", PodcastIcon],
+    ["Radio", RadioIcon],
   ] as const;
   const detailPodcast = lib.podcasts.find((p) => p.id === detail);
   const titleQuery = episodeQuery.trim().toLocaleLowerCase();
-  const eps = useMemo(() => lib.episodes.filter((e) => {
-    if (detail) return e.podcastId === detail && e.title.toLocaleLowerCase().includes(titleQuery);
-    if (filter === "Downloaded") return saved.includes(e.id);
-    return filter !== "Unplayed" || !e.played;
-  }), [lib.episodes, detail, titleQuery, filter, saved]);
+  const eps = useMemo(() => {
+    if (!detail && filter === "Downloaded") {
+      const episodes = new Map(downloaded.map(e => [e.id, e]));
+      for (const e of lib.episodes) if (saved.includes(e.id)) episodes.set(e.id, e);
+      return [...episodes.values()].sort((a, b) => b.date - a.date);
+    }
+    return lib.episodes.filter((e) => {
+      if (detail) return e.podcastId === detail && e.title.toLocaleLowerCase().includes(titleQuery);
+      return filter !== "Unplayed" || !e.played;
+    });
+  }, [lib.episodes, detail, titleQuery, filter, saved, downloaded]);
   const emptyImport = detailPodcast?.importPending ? detailPodcast
     : tab === "Episodes" && filter !== "Downloaded" && !eps.length ? importingPodcast : undefined;
+  function openEpisode(e: Episode) {
+    setReadEpisode(e);
+    setModal("episode");
+  }
+  function downloadActions(e: Episode) {
+    setActionEpisode(e);
+    setModal("download-actions");
+  }
+  function podcastActions(p: Podcast) {
+    setActionPodcast(p);
+    setModal("podcast-actions");
+  }
   const row = (e: Episode) => (
-    <article
-      className={"row " + (swipedEpisode === e.id ? "swiped" : "")}
-      key={e.id}
-      onPointerDown={(event) => {
-        if (!saved.includes(e.id) || (event.pointerType === "mouse" && event.button !== 0)) return;
-        episodeGesture.current.set(e.id, { x: event.clientX, y: event.clientY });
-        episodePress.current.set(e.id, window.setTimeout(() => {
-          ignoreEpisodeClick.current.add(e.id);
-          setSwipedEpisode(e.id);
-        }, 550));
-      }}
-      onPointerMove={(event) => {
-        const start = episodeGesture.current.get(e.id);
-        if (!start) return;
-        if (Math.abs(event.clientX - start.x) > 12 || Math.abs(event.clientY - start.y) > 12) {
-          window.clearTimeout(episodePress.current.get(e.id));
-          episodePress.current.delete(e.id);
-        }
-      }}
-      onPointerUp={(event) => {
-        window.clearTimeout(episodePress.current.get(e.id));
-        episodePress.current.delete(e.id);
-        const start = episodeGesture.current.get(e.id);
-        episodeGesture.current.delete(e.id);
-        if (!start) return;
-        const dx = event.clientX - start.x;
-        if (dx < -55) {
-          ignoreEpisodeClick.current.add(e.id);
-          setSwipedEpisode(e.id);
-        } else if (dx > 55 && swipedEpisode === e.id) {
-          ignoreEpisodeClick.current.add(e.id);
-          setSwipedEpisode("");
-        }
-      }}
-      onPointerCancel={() => {
-        window.clearTimeout(episodePress.current.get(e.id));
-        episodePress.current.delete(e.id);
-        episodeGesture.current.delete(e.id);
-      }}
-      onClickCapture={(event) => {
-        if (!ignoreEpisodeClick.current.delete(e.id)) return;
-        if ((event.target as HTMLElement).closest(".episode-delete")) return;
-        event.preventDefault();
-        event.stopPropagation();
-      }}
-    >
+    <article className="row" key={e.id}
+      {...(saved.includes(e.id) ? rowActions(e.id, () => downloadActions(e)) : {})}>
       <button
         className="artplay"
-        aria-label={"Play " + e.title}
-        onClick={() => run(() => start(e))}
+        aria-label={"Details for " + e.title}
+        onClick={() => openEpisode(e)}
       >
         <Art e={e} />
       </button>
       <div className="rowcopy">
-        <div className="eyebrow">{name(e)}</div>
-        <button className="rowtitle" onClick={() => run(() => start(e))}>
+        {!detail && <div className="eyebrow">{name(e)}</div>}
+        <button className="rowtitle" onClick={() => openEpisode(e)}>
           {e.title}
         </button>
         <small>
@@ -804,31 +856,16 @@ export default function App() {
         </small>
       </div>
       <div className="actions">
-        <IconButton
-          label={
-            saved.includes(e.id) ? "Delete download" : "Download episode"
-          }
-          click={() =>
-            run(() => (saved.includes(e.id) ? removeDownload(e) : save(e)))
-          }
+        {percent[e.id] !== undefined ? (
+          <span className="icon download-progress" role="status" aria-label="Downloading">
+            {percent[e.id] ? <small>{percent[e.id]}%</small> : <LoaderCircle size={18} />}
+          </span>
+        ) : <IconButton
+          label={saved.includes(e.id) ? "Manage download" : "Download episode"}
+          click={() => saved.includes(e.id) ? downloadActions(e) : run(() => save(e))}
         >
-          {percent[e.id] !== undefined ? (
-            <small>{percent[e.id]}%</small>
-          ) : saved.includes(e.id) ? (
-            <Check />
-          ) : (
-            <Download />
-          )}
-        </IconButton>
-        {swipedEpisode === e.id && saved.includes(e.id) && (
-          <button className="episode-delete" aria-label="Delete downloaded episode" onClick={() => {
-            ignoreEpisodeClick.current.delete(e.id);
-            setSwipedEpisode("");
-            run(() => removeDownload(e));
-          }}>
-            <Trash2 size={17} /> Delete
-          </button>
-        )}
+          {saved.includes(e.id) ? <Check /> : <Download />}
+        </IconButton>}
         <button
           className="round"
           aria-label={"Play or pause " + e.title}
@@ -862,10 +899,10 @@ export default function App() {
         </div>
       </header>
       <main>
-        <div className="pagehead">
+        {!detail && <div className="pagehead">
           <div className="over"><span className="tinyline" /> {profileLabel.toUpperCase()}’S LIBRARY</div>
-          <h1>{detail ? lib.podcasts.find((p) => p.id === detail)?.title : tab}</h1>
-        </div>
+          <h1>{tab}</h1>
+        </div>}
         {!online && (
           <div className="notice">
             <WifiOff size={16} /> Offline library
@@ -886,7 +923,7 @@ export default function App() {
             <Art e={hero} />
           </section>
         )}
-        {tab === "Podcasts" && !detail ? (
+        {tab === "Radio" ? <Radio active={playing ? episode?.station?.id : undefined} play={playStation} /> : tab === "Podcasts" && !detail ? (
           <>
             <div className="sectionhead">
               <h2>Podcasts <em>{lib.podcasts.length}</em></h2>
@@ -895,59 +932,13 @@ export default function App() {
               </button>
             </div>
             {lib.podcasts.map((p) => (
-              <div
-                className={"subscription-swipe " + (swipedPodcast === p.id ? "swiped" : "")}
-                key={p.id}
-                onPointerDown={(event) => {
-                  if (event.pointerType === "mouse" && event.button !== 0) return;
-                  podcastGesture.current.set(p.id, { x: event.clientX, y: event.clientY });
-                  const timer = window.setTimeout(() => {
-                    ignorePodcastClick.current.add(p.id);
-                    setEpisodeQuery("");
-                    setPodcastId(p.id);
-                    setModal("remove");
-                  }, 550);
-                  podcastPress.current.set(p.id, timer);
+              <div className="subscription-swipe" key={p.id} {...rowActions(p.id, () => podcastActions(p))}>
+                <button className="subscription" onClick={() => {
+                  setEpisodeQuery("");
+                  setPodcastId(p.id);
+                  setVisibleCount(15);
+                  window.scrollTo(0, 0);
                 }}
-                onPointerMove={(event) => {
-                  const start = podcastGesture.current.get(p.id);
-                  if (!start) return;
-                  const dx = event.clientX - start.x;
-                  const dy = event.clientY - start.y;
-                  if (Math.abs(dx) > 12 || Math.abs(dy) > 12) {
-                    window.clearTimeout(podcastPress.current.get(p.id));
-                    podcastPress.current.delete(p.id);
-                  }
-                }}
-                onPointerUp={(event) => {
-                  window.clearTimeout(podcastPress.current.get(p.id));
-                  podcastPress.current.delete(p.id);
-                  const start = podcastGesture.current.get(p.id);
-                  podcastGesture.current.delete(p.id);
-                  if (!start) return;
-                  const dx = event.clientX - start.x;
-                  if (dx < -55) {
-                    ignorePodcastClick.current.add(p.id);
-                    setSwipedPodcast(p.id);
-                  } else if (dx > 55 && swipedPodcast === p.id) {
-                    ignorePodcastClick.current.add(p.id);
-                    setSwipedPodcast("");
-                  }
-                }}
-                onPointerCancel={() => {
-                  window.clearTimeout(podcastPress.current.get(p.id));
-                  podcastPress.current.delete(p.id);
-                  podcastGesture.current.delete(p.id);
-                }}
-              >
-                <button
-                  className="subscription"
-                  onClick={() => {
-                    if (ignorePodcastClick.current.delete(p.id)) return;
-                    setEpisodeQuery("");
-                    setPodcastId(p.id);
-                    setVisibleCount(15);
-                  }}
                 >
                   <Art e={p} />
                   <div>
@@ -962,15 +953,9 @@ export default function App() {
                   {lib.episodes.some((e) => e.podcastId === p.id && !e.played) && <i className="unread-dot" aria-label="Unread episodes" />}
                   <ChevronRight />
                 </button>
-                {swipedPodcast === p.id && (
-                  <div className="subscription-actions">
-                    <button onClick={() => run(() => deletePodcast(p.id))}><Trash2 size={17} /> Delete</button>
-                    <button onClick={() => {
-                      run(() => markPodcastRead(p.id));
-                      setSwipedPodcast("");
-                    }}>Mark all read</button>
-                  </div>
-                )}
+                <button className="row-menu" aria-label={"Options for " + p.title} onClick={() => podcastActions(p)}>
+                  <MoreHorizontal size={20} />
+                </button>
               </div>
             ))}
           </>
@@ -981,9 +966,9 @@ export default function App() {
               {detail && (
                 <button
                   className="secondary"
-                  onClick={() => setModal("remove")}
+                  onClick={() => detailPodcast && podcastActions(detailPodcast)}
                 >
-                  Unsubscribe
+                  <MoreHorizontal size={18} /> Options
                 </button>
               )}
               {tab === "Episodes" && (
@@ -1050,11 +1035,11 @@ export default function App() {
           <div className="minibar">
             <div className="mini">
               <button className="minititle" onClick={() => setModal("player")}>
-                <Art e={selected} />
+                <Art e={selected} eager />
                 <div>
                   <div className="eyebrow">{episode ? "Now playing" : "Ready to play"}</div>
                   <b>{selected.title}</b>
-                  <small>{name(selected)}</small>
+                  <small>{selected.station ? "Live radio" : name(selected)}</small>
                 </div>
               </button>
               <div className="actions">
@@ -1087,8 +1072,11 @@ export default function App() {
       {modal && (
         <div
           className={"scrim " + (modal === "player" ? "fullscreen" : "")}
+          onPointerDown={(event) => { backdropPressed.current = event.target === event.currentTarget; }}
+          onPointerCancel={() => { backdropPressed.current = false; }}
           onClick={() => {
-            if (modal !== "login") setModal("");
+            if (backdropPressed.current && modal !== "login") setModal("");
+            backdropPressed.current = false;
           }}
         >
           <section
@@ -1097,7 +1085,23 @@ export default function App() {
             aria-modal="true"
             aria-label={modal === "player" ? "Now playing" : modal}
             onClick={(e) => e.stopPropagation()}
+            onTouchStart={(event) => {
+              dismissGesture.current = null;
+              if (modal !== "player" || event.touches.length !== 1 || event.currentTarget.scrollTop > 0
+                || (event.target as Element).closest("input, select, button")) return;
+              const touch = event.touches[0];
+              dismissGesture.current = { x: touch.clientX, y: touch.clientY };
+            }}
+            onTouchCancel={() => { dismissGesture.current = null; }}
+            onTouchEnd={(event) => {
+              const start = dismissGesture.current;
+              dismissGesture.current = null;
+              const touch = event.changedTouches[0];
+              if (modal === "player" && start && touch && touch.clientY - start.y > 72
+                && Math.abs(touch.clientX - start.x) < 55) setModal("");
+            }}
           >
+            {modal === "player" && <div className="player-grabber" aria-hidden="true" />}
             <div className="sheethead">
               <h2>
                 {
@@ -1107,7 +1111,10 @@ export default function App() {
                     devices: "Playback device",
                     login: "Sign in",
                     add: "Add podcast",
-                    remove: "Remove subscription?",
+                    episode: "Episode details",
+                    "podcast-actions": actionPodcast?.title,
+                    "download-actions": "Downloaded episode",
+                    remove: "Unsubscribe?",
                   }[modal]
                 }
               </h2>
@@ -1117,9 +1124,10 @@ export default function App() {
             </div>
             {modal === "player" && selected && (
               <div className="full">
-                <Art e={selected} />
+                <Art e={selected} eager />
                 <div className="eyebrow">{name(selected)}</div>
                 <h2>{selected.title}</h2>
+                {selected.station ? <div className="live-label">Live radio</div> : <>
                 <input
                   aria-label="Playback position"
                   type="range"
@@ -1131,15 +1139,15 @@ export default function App() {
                 <div className="time">
                   <span>{fmt(pos)}</span>
                   <span>{fmt(selected.duration)}</span>
-                </div>
+                </div></>}
                 <div className="controls">
-                  <button
+                  {!selected.station && <button
                     aria-label="Back 15 seconds"
                     onClick={() => run(() => seek(pos - 15))}
                   >
                     <Rewind />
                     15
-                  </button>
+                  </button>}
                   <button
                     className="round big"
                     onClick={() => run(toggle)}
@@ -1147,16 +1155,16 @@ export default function App() {
                   >
                     {playing ? <Pause /> : <Play />}
                   </button>
-                  <button
+                  {!selected.station && <button
                     aria-label="Forward 30 seconds"
                     onClick={() => run(() => seek(pos + 30))}
                   >
                     30
                     <FastForward />
-                  </button>
+                  </button>}
                 </div>
                 <div className="controls">
-                  {!remote && (
+                  {!selected.station && player === phone && (
                     <select
                       aria-label="Playback speed"
                       value={speed}
@@ -1180,6 +1188,18 @@ export default function App() {
                 {volumeControls}
                 <p>{selected.description}</p>
               </div>
+            )}
+            {modal === "episode" && readEpisode && (
+              <>
+                <div className="episode-sheet-title">
+                  <Art e={readEpisode} eager />
+                  <div><div className="eyebrow">{name(readEpisode)}</div><h3>{readEpisode.title}</h3></div>
+                </div>
+                <button className="primary" onClick={() => run(() => id === readEpisode.id ? toggle() : start(readEpisode))}>
+                  {id === readEpisode.id && playing ? <><Pause /> Pause</> : <><Play /> Play episode</>}
+                </button>
+                <EpisodeDetails key={readEpisode.id} episode={readEpisode} />
+              </>
             )}
             {modal === "add" && (
               <>
@@ -1235,17 +1255,34 @@ export default function App() {
                 </select>
               </label>
             )}
-            {modal === "remove" && (
+            {modal === "podcast-actions" && actionPodcast && (
+              <div className="sheet-actions">
+                <button className="option" onClick={() => {
+                  setModal("");
+                  run(() => markPodcastRead(actionPodcast.id));
+                }}><Check /> Mark all as played</button>
+                <button className="option destructive" onClick={() => setModal("remove")}><Trash2 /> Unsubscribe</button>
+              </div>
+            )}
+            {modal === "remove" && actionPodcast && (
               <>
-                <p>
-                  This removes the podcast and its episodes from your library.
-                </p>
-                <button
-                  className="primary"
-                  onClick={() => run(() => deletePodcast(detail))}
-                >
-                  Remove podcast
-                </button>
+                <p className="sheet-copy">Stop following <strong>{actionPodcast.title}</strong>? Saved episodes stay in Downloads.</p>
+                <div className="confirm-actions">
+                  <button className="secondary" onClick={() => setModal("")}>Cancel</button>
+                  <button className="destructive confirm-delete" onClick={() => run(() => deletePodcast(actionPodcast.id))}>Unsubscribe</button>
+                </div>
+              </>
+            )}
+            {modal === "download-actions" && actionEpisode && (
+              <>
+                <p className="sheet-copy">{actionEpisode.title}</p>
+                <div className="confirm-actions">
+                  <button className="secondary" onClick={() => setModal("")}>Cancel</button>
+                  <button className="destructive confirm-delete" onClick={() => {
+                    setModal("");
+                    run(() => removeDownload(actionEpisode));
+                  }}>Delete download</button>
+                </div>
               </>
             )}
             {modal === "devices" && (

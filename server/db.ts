@@ -11,6 +11,8 @@ export function database(path: string) {
  CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT);`);
   if (!db.prepare("PRAGMA table_info(podcasts)").all().some((column) => column.name === "importPending"))
     db.exec("ALTER TABLE podcasts ADD COLUMN importPending INTEGER NOT NULL DEFAULT 0");
+  if (!db.prepare("PRAGMA table_info(episodes)").all().some((column) => column.name === "transcript"))
+    db.exec("ALTER TABLE episodes ADD COLUMN transcript TEXT");
   return db;
 }
 export type DB = ReturnType<typeof database>;
@@ -41,7 +43,7 @@ export function ingest(db: DB, xml: string, url: string) {
         .map((e: any) => e.id),
     );
     const insert = db.prepare(
-      `INSERT INTO episodes(id,podcastId,title,audio,art,description,date,duration,cached) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET title=excluded.title,audio=excluded.audio,art=excluded.art,description=excluded.description,date=excluded.date,duration=excluded.duration`,
+      `INSERT INTO episodes(id,podcastId,title,audio,art,description,date,duration,transcript,cached) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET title=excluded.title,audio=excluded.audio,art=excluded.art,description=excluded.description,date=excluded.date,duration=excluded.duration,transcript=excluded.transcript`,
     );
     for (const e of episodes)
       insert.run(
@@ -53,6 +55,7 @@ export function ingest(db: DB, xml: string, url: string) {
         e.description,
         e.date,
         e.duration,
+        e.transcript && JSON.stringify(e.transcript),
         (old?.newest != null ? e.date > Number(old.newest) : latest.has(e.id))
           ? "pending"
           : "none",
@@ -67,7 +70,10 @@ export function library(db: DB): Library {
       .all() as unknown as Podcast[],
     episodes: db
       .prepare("SELECT * FROM episodes ORDER BY date DESC")
-      .all() as unknown as Episode[],
+      .all().map(({ transcript, ...row }) => ({
+        ...row,
+        transcript: transcript ? JSON.parse(String(transcript)) : null,
+      })) as Episode[],
     queue: db
       .prepare("SELECT id FROM queue ORDER BY rank")
       .all()

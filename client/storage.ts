@@ -21,7 +21,7 @@ export async function request<T>(
 ): Promise<T> {
   const res = await fetch(apiPath(path), {
     method,
-    signal,
+    signal: signal ?? AbortSignal.timeout(8000),
     cache: "no-store",
     headers: { "Content-Type": "application/json", "X-Airwave": "1" },
     body: body === undefined ? undefined : JSON.stringify(body),
@@ -41,7 +41,31 @@ export type Progress = {
   updated: number;
 };
 export async function saveProgress(p: Progress) {
-  await (await db).put("progress", p, p.id);
+  const tx = (await db).transaction(["meta", "progress"], "readwrite");
+  const meta = tx.objectStore("meta");
+  const saved: Episode | undefined = await meta.get("saved:" + p.id);
+  if (saved && p.updated >= saved.updated)
+    await meta.put({ ...saved, position: p.position, updated: p.updated, played: +p.played }, "saved:" + p.id);
+  await tx.objectStore("progress").put(p, p.id);
+  await tx.done;
+}
+export async function rememberDownloads(episodes: Episode[], podcasts: Library["podcasts"]) {
+  const tx = (await db).transaction(["audio", "meta"], "readwrite");
+  const ids = new Set(await tx.objectStore("audio").getAllKeys());
+  const titles = new Map(podcasts.map(podcast => [podcast.id, podcast.title]));
+  const meta = tx.objectStore("meta");
+  for (const episode of episodes) {
+    if (!ids.has(episode.id)) continue;
+    const key = "saved:" + episode.id;
+    const stored: Episode | undefined = await meta.get(key);
+    if (!stored || stored.updated <= episode.updated)
+      await meta.put({ ...episode, podcastTitle: titles.get(episode.podcastId) }, key);
+  }
+  await tx.done;
+}
+export async function downloadedEpisodes(ids: string[]): Promise<Episode[]> {
+  const entries = await Promise.all(ids.map(id => get<Episode>("saved:" + id)));
+  return entries.filter((episode): episode is Episode => !!episode);
 }
 export function mergeProgress(lib: Library, items: Progress[]): Library {
   const pending = new Map(items.map((p) => [p.id, p]));
@@ -62,7 +86,8 @@ export async function localLibrary() {
   return mergeProgress(lib, await d.getAll("progress"));
 }
 let syncTask: Promise<Library> | undefined;
-export function sync() {
+export async function sync(afterMutation = false): Promise<Library> {
+  if (afterMutation) await syncTask?.catch(() => {});
   return (syncTask ??= synchronize().finally(() => (syncTask = undefined)));
 }
 async function synchronize() {
@@ -72,6 +97,8 @@ async function synchronize() {
     await request("progress/" + p.id, "PUT", p);
   }
   const fresh = await request<Library>("library");
+  const previous = await localLibrary();
+  if (previous) await rememberDownloads(previous.episodes, previous.podcasts);
   const tx = d.transaction(["meta", "progress"], "readwrite");
   await tx.objectStore("meta").put(fresh, "library");
   for (const p of pending) {
@@ -90,14 +117,6 @@ function rememberAudio(id: string, value: Blob) {
   if (existing) URL.revokeObjectURL(existing);
   localAudioURLs.set(id, URL.createObjectURL(value));
 }
-export async function loadDownloadedAudio() {
-  const d = await db;
-  const tx = d.transaction("audio");
-  for await (const cursor of tx.store) {
-    if (cursor.value instanceof Blob) rememberAudio(String(cursor.key), cursor.value);
-  }
-  await tx.done;
-}
 export async function downloads(): Promise<string[]> {
   const keys = (await (await db).getAllKeys("audio")).map(String);
   const active = new Set(keys);
@@ -111,7 +130,10 @@ export async function downloads(): Promise<string[]> {
   return keys;
 }
 export async function drop(id: string) {
-  await (await db).delete("audio", id);
+  const tx = (await db).transaction(["audio", "meta"], "readwrite");
+  await tx.objectStore("audio").delete(id);
+  await tx.objectStore("meta").delete("saved:" + id);
+  await tx.done;
   const url = localAudioURLs.get(id);
   if (url) URL.revokeObjectURL(url);
   localAudioURLs.delete(id);
@@ -123,10 +145,29 @@ export async function download(
   e: Episode,
   report: (n: number) => void,
   manual: boolean,
+  serverAvailable = true,
 ) {
-  const res = await fetch(apiPath("audio/" + e.id));
-  if (!res.ok || !res.body)
-    throw Error("Audio download unavailable. Try again when connected.");
+  const sources = serverAvailable
+    ? e.cached === "ready" ? [apiPath("download/" + e.id), e.audio] : [e.audio, apiPath("download/" + e.id)]
+    : [e.audio];
+  let res: Response | undefined;
+  for (const source of sources) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), source === e.audio ? 3500 : 10000);
+    try {
+      const response = await fetch(source, { signal: controller.signal });
+      if (response.ok && response.body) {
+        res = response;
+        break;
+      }
+      await response.body?.cancel();
+    } catch {
+      // Publisher downloads can require CORS. Try the server's streaming route.
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  if (!res?.body) throw Error("Download unavailable. This publisher may require the home server.");
   const total = Number(res.headers.get("Content-Length"));
   const reader = res.body.getReader();
   let size = 0;
@@ -141,17 +182,12 @@ export async function download(
   if (!size || (total && size !== total)) throw Error("Incomplete download");
   const d = await db;
   const tx = d.transaction(["audio", "meta"], "readwrite");
-  await tx
-    .objectStore("audio")
-    .put(
-      new Blob(parts, {
-        type: res.headers.get("Content-Type") || "audio/mpeg",
-      }),
-      e.id,
-    );
-  await tx.objectStore("meta").put(manual, "pin:" + e.id);
+  const audio = new Blob(parts, { type: res.headers.get("Content-Type") || "audio/mpeg" });
+  await tx.objectStore("audio").put(audio, e.id);
+  await tx.objectStore("meta").put(e, "saved:" + e.id);
+  if (manual) await tx.objectStore("meta").put(true, "pin:" + e.id);
   await tx.done;
-  rememberAudio(e.id, new Blob(parts, { type: res.headers.get("Content-Type") || "audio/mpeg" }));
+  rememberAudio(e.id, audio);
 }
 export function automaticIds(lib: Library, n: number) {
   return lib.podcasts.flatMap((p) =>

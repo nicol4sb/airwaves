@@ -5,6 +5,7 @@ export interface SonosAdapter {
   discover(): Promise<Speaker[]>;
   cached(): Speaker[] | undefined;
   start(id: string, tracks: string[], position: number): Promise<void>;
+  playRadio(id: string, url: string, title: string): Promise<void>;
   control(
     id: string,
     action: "resume" | "pause" | "seek" | "volume",
@@ -193,6 +194,17 @@ export class LocalSonos implements SonosAdapter {
     if (position >= 1)
       await cmd("Seek", { Unit: "REL_TIME", Target: clock(position) });
   }
+  async playRadio(id: string, url: string, title: string) {
+    const { host } = await this.target(id);
+    const meta = '<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/"><item id="radio" parentID="0" restricted="true"><dc:title>'
+      + escapeXML(title) + '</dc:title><upnp:class>object.item.audioItem.audioBroadcast</upnp:class></item></DIDL-Lite>';
+    await soap(host, "AVTransport", "SetAVTransportURI", {
+      InstanceID: 0,
+      CurrentURI: url.replace(/^https?:/, "x-rincon-mp3radio:"),
+      CurrentURIMetaData: meta,
+    });
+    await soap(host, "AVTransport", "Play", { InstanceID: 0, Speed: 1 });
+  }
   async control(
     id: string,
     action: "resume" | "pause" | "seek" | "volume",
@@ -250,6 +262,9 @@ export class MockSonos implements SonosAdapter {
   }
   async start(_id: string, tracks: string[], position: number) {
     Object.assign(this.state, { audio: tracks[0], position, playing: true });
+  }
+  async playRadio(id: string, url: string) {
+    await this.start(id, [url], 0);
   }
   async status() {
     return this.state;

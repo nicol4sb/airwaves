@@ -1,9 +1,11 @@
 import express from "express";
-import { mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { database, ingest, library, progress, transaction } from "./db";
 import { DEFAULT_FEED, hash } from "./rss";
-import { externalURL, fetchXML } from "./network";
+import { externalURL, fetchXML, openExternal, publicHost } from "./network";
+import { pipeline } from "node:stream/promises";
+import { radioById } from "../shared/radio";
 import { AudioCache } from "./cache";
 import type { SonosAdapter } from "../sonos/adapter";
 
@@ -80,6 +82,27 @@ export function openProfile(dir: string, audioDir: string, seedStarter: boolean,
     });
     r.json({ ok: true });
   });
+  router.get("/transcript/:id", async (q, r) => {
+    const row = db.prepare("SELECT transcript FROM episodes WHERE id=?").get(q.params.id);
+    if (!row?.transcript) return r.status(404).json({ error: "No publisher transcript" });
+    const { url } = JSON.parse(String(row.transcript));
+    r.json({ text: await fetchXML(url, 3 * 1024 ** 2) });
+  });
+  router.get("/download/:id", async (q, r) => {
+    const id = q.params.id;
+    const row = db.prepare("SELECT audio,cached,mime FROM episodes WHERE id=?").get(id);
+    if (!row) return r.status(404).json({ error: "Episode unavailable" });
+    if (row.cached === "ready" && existsSync(cache.path(id))) {
+      r.type(String(row.mime)).sendFile(cache.path(id), { cacheControl: false });
+      return;
+    }
+    // Interactive downloads stream immediately, independently of the Pi’s cache worker.
+    const upstream = await openExternal(String(row.audio), 600_000);
+    if (r.destroyed) { upstream.destroy(); return; }
+    r.type(String(upstream.headers["content-type"] ?? "audio/mpeg"));
+    if (upstream.headers["content-length"]) r.set("Content-Length", upstream.headers["content-length"]);
+    await pipeline(upstream, r);
+  });
   router.get("/audio/:id", async (q, r) => {
     const id = q.params.id;
     await cache.ensure(id);
@@ -92,10 +115,14 @@ export function openProfile(dir: string, audioDir: string, seedStarter: boolean,
     );
   });
   router.post("/speakers/:id", async (q, r) => {
-    const { action, value = 0, ids } = q.body;
+    const { action, value = 0, ids, stationId } = q.body;
     if (!Number.isFinite(value) || value < 0)
       throw Error("Invalid position or volume");
-    if (action === "start") {
+    if (action === "radio" && typeof stationId === "string") {
+      const station = await radioById(stationId);
+      await publicHost(externalURL(station.url));
+      await sonos.playRadio(q.params.id, station.url, station.name);
+    } else if (action === "start") {
       if (!Array.isArray(ids) || !ids.length || ids.length > 500)
         throw Error("Invalid tracks");
       const tracks = ids.map((id) => {
