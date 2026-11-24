@@ -31,7 +31,6 @@ import {
   RefreshCw,
   Smartphone,
   ArrowLeft,
-  WifiOff,
   LoaderCircle,
   Trash2,
   Star,
@@ -62,6 +61,7 @@ import SwipeActionRow from "./SwipeActionRow";
 import EpisodeDetails from "./EpisodeDetails";
 import { haptic, useRowActions } from "./rowActions";
 import { usePlayerDismiss } from "./usePlayerDismiss";
+import { useAppUpdates } from "./useAppUpdates";
 import { lastListened, withProgress } from "./listening";
 const empty: Library = { episodes: [], podcasts: [], queue: [] };
 const tabs = [
@@ -204,6 +204,7 @@ export default function App() {
   const backdropPressed = useRef(false);
   const playbackAttempt = useRef(0);
   const retryConnection = useRef<() => void>(() => {});
+  const { updateReady, checkForUpdate } = useAppUpdates();
   const pendingDelete = useRef(new Set<string>());
   const running = useRef(new Set<string>()),
     last = useRef(0),
@@ -211,6 +212,8 @@ export default function App() {
     searchRequest = useRef(0);
   const pickerOpen = modal === "devices";
   const online = serverReachable ?? navigator.onLine;
+  const connectionLabel = serverReachable === undefined ? "Checking home server connection"
+    : serverReachable ? "Connected to home server" : "Offline. Reconnect to home server";
   const remoteUnavailable = !online || !!speakerError;
   const player = remoteUnavailable ? phone : remote ?? phone;
   const deviceLabel = remote && !remoteUnavailable ? remote.speaker.name : "This device";
@@ -263,7 +266,7 @@ export default function App() {
     let timer: number;
     let probe: AbortController | undefined;
     let lastCheck: boolean | undefined;
-    const check = async () => {
+    const check = async (checkAppUpdate = false) => {
       window.clearTimeout(timer);
       probe?.abort();
       probe = undefined;
@@ -285,6 +288,7 @@ export default function App() {
       setServerReachable(reachable);
       if (reachable) {
         const reconnected = lastCheck === false;
+        void checkForUpdate(checkAppUpdate || reconnected);
         void restored.then(() => { if (active) return refresh(reconnected); });
       } else {
         void restored.then(() => { if (active) setReady(true); });
@@ -294,9 +298,9 @@ export default function App() {
     };
     const resume = () => {
       if (!document.hidden) setForeground(n => n + 1);
-      void check();
+      void check(true);
     };
-    retryConnection.current = check;
+    retryConnection.current = () => { void check(true); };
     window.addEventListener("login-needed", login);
     document.addEventListener("visibilitychange", resume);
     for (const event of ["focus", "pageshow", "online", "offline"]) window.addEventListener(event, resume);
@@ -310,7 +314,7 @@ export default function App() {
       document.removeEventListener("visibilitychange", resume);
       for (const event of ["focus", "pageshow", "online", "offline"]) window.removeEventListener(event, resume);
     };
-  }, []);
+  }, [checkForUpdate]);
   const importingEpisodes = lib.podcasts.some(p => p.importPending && !p.error);
   useEffect(() => {
     if (!online || !importingEpisodes || addingPodcastURL) return;
@@ -1046,26 +1050,33 @@ export default function App() {
           <div className="headtools">
             <button className="device" onClick={devices}>
               <Cast size={16} />
-              {deviceLabel}
+              <span>{deviceLabel}</span>
               <ChevronDown size={14} />
             </button>
             <IconButton label="Library settings" click={() => show("settings")}>
               <Settings2 />
             </IconButton>
-            {serverReachable === true && (
-              <span className="server-dot" role="img" aria-label="Connected to home server" title="Connected to home server" />
+            {serverReachable === false ? (
+              <button type="button" className="server-dot offline" aria-label={connectionLabel}
+                title={connectionLabel} onClick={() => retryConnection.current()} />
+            ) : (
+              <span className="server-dot" data-connected={serverReachable} role="img"
+                aria-label={connectionLabel} title={connectionLabel} />
             )}
           </div>
         </div>
       </header>
       <main>
-        {(serverReachable === false || (serverReachable && syncError)) && (
+        {updateReady && (
           <div className="notice library-notice" role="status">
-            {serverReachable ? <RefreshCw size={16} /> : <WifiOff size={16} />}
-            <span>{serverReachable
-              ? <>Library sync paused. {syncError}</>
-              : <>Offline library. Couldn’t reach <a href="/health" target="_blank" rel="noreferrer">{location.origin}</a>.</>}
-            </span>
+            <span>Airwave update ready.</span>
+            <button className="secondary" onClick={() => window.location.reload()}>Reload</button>
+          </div>
+        )}
+        {serverReachable && syncError && (
+          <div className="notice library-notice" role="status">
+            <RefreshCw size={16} />
+            <span>Library sync paused. {syncError}</span>
             <button className="secondary" onClick={() => retryConnection.current()}>Retry</button>
           </div>
         )}

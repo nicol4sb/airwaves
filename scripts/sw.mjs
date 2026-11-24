@@ -11,7 +11,8 @@ writeFileSync(
 const artworkCache = 'airwave-artwork-v1';
 const artworkRequests = new Map();
 self.addEventListener('install', event => {
-  event.waitUntil(caches.open(cacheName).then(cache => cache.addAll(${JSON.stringify(files)})).then(() => self.skipWaiting()));
+  const requests = ${JSON.stringify(files)}.map(path => new Request(path, { cache: 'reload' }));
+  event.waitUntil(caches.open(cacheName).then(cache => cache.addAll(requests)).then(() => self.skipWaiting()));
 });
 self.addEventListener('activate', event => {
   event.waitUntil(caches.keys().then(keys => Promise.all(keys

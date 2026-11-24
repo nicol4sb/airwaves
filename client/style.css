@@ -97,17 +97,38 @@ main,
   color: #281e36;
 }
 .headtools {
-  position: relative;
+  min-width: 0;
   gap: 12px;
 }
+.device,
+.device > span {
+  min-width: 0;
+}
+.device > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .server-dot {
-  position: absolute;
-  top: 2px;
-  right: 2px;
+  flex: 0 0 44px;
+  height: 44px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  color: var(--sub);
+}
+.server-dot::before {
+  content: "";
   width: 7px;
   height: 7px;
   border-radius: 50%;
-  background: #70d797;
+  background: currentColor;
+}
+.server-dot[data-connected="true"] {
+  color: #70d797;
+}
+.server-dot.offline {
+  color: #f47f82;
 }
 .device,
 .secondary,
@@ -250,9 +271,6 @@ small span {
 .library-notice span {
   flex: 1;
   overflow-wrap: anywhere;
-}
-.library-notice a {
-  color: inherit;
 }
 .library-notice svg {
   flex-shrink: 0;
