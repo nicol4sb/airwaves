@@ -27,7 +27,7 @@ app.disable("x-powered-by");
 app.use(express.json({ limit: "64kb" }));
 app.get("/health", (_q, r) => {
   for (const profile of libraries) profile.db.prepare("SELECT 1").get();
-  r.json({ ok: true });
+  r.set("Cache-Control", "no-store").json({ ok: true });
 });
 app.use("/api", (q, r, next) => {
   r.set("Cache-Control", "no-store");

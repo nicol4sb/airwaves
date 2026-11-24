@@ -5,33 +5,40 @@ import { apiPath, profile } from "./profile";
 type LocalStar = StarChange & { pending: boolean };
 
 // Nic keeps the original store, including downloads and unsynced progress.
-const db = openDB(profile === "nic" ? "airwave" : "airwave-" + profile, 2, {
-  async upgrade(db, oldVersion, _newVersion, tx) {
-    if (oldVersion === 0)
-      for (const key of ["meta", "audio", "progress"]) db.createObjectStore(key);
-    const stars = db.createObjectStore("stars", { keyPath: "id" });
-    if (oldVersion === 1) {
-      const meta = tx.objectStore("meta");
-      try {
-        const entries: Episode[] = (await meta.get("starred")) ?? [];
-        for (const episode of entries) {
-          await stars.put({ id: episode.id, episode, updated: 0, pending: true } satisfies LocalStar);
+let connection: ReturnType<typeof openDB> | undefined;
+function database() {
+  return connection ??= openDB(profile === "nic" ? "airwave" : "airwave-" + profile, 2, {
+    terminated() { connection = undefined; },
+    async upgrade(db, oldVersion, _newVersion, tx) {
+      if (oldVersion === 0)
+        for (const key of ["meta", "audio", "progress"]) db.createObjectStore(key);
+      const stars = db.createObjectStore("stars", { keyPath: "id" });
+      if (oldVersion === 1) {
+        const meta = tx.objectStore("meta");
+        try {
+          const entries: Episode[] = (await meta.get("starred")) ?? [];
+          for (const episode of entries) {
+            await stars.put({ id: episode.id, episode, updated: 0, pending: true } satisfies LocalStar);
+          }
+          await meta.delete("starred");
+        } catch {
+          tx.abort();
         }
-        await meta.delete("starred");
-      } catch {
-        tx.abort();
       }
-    }
-  },
-});
+    },
+  }).catch(error => {
+    connection = undefined;
+    throw error;
+  });
+}
 export async function get<T>(key: string): Promise<T | undefined> {
-  return (await db).get("meta", key);
+  return (await database()).get("meta", key);
 }
 export async function put(key: string, value: unknown) {
-  await (await db).put("meta", value, key);
+  await (await database()).put("meta", value, key);
 }
 export async function setStationHidden(station: RadioStation, hidden: boolean): Promise<RadioStation[]> {
-  const tx = (await db).transaction("meta", "readwrite");
+  const tx = (await database()).transaction("meta", "readwrite");
   const stations: RadioStation[] = (await tx.store.get("hidden-stations")) ?? [];
   const next = stations.filter(entry => entry.id !== station.id);
   if (hidden) next.push(station);
@@ -61,7 +68,7 @@ export async function request<T>(
   return res.json();
 }
 export async function saveProgress(p: Progress) {
-  const tx = (await db).transaction(["meta", "progress", "stars"], "readwrite");
+  const tx = (await database()).transaction(["meta", "progress", "stars"], "readwrite");
   const meta = tx.objectStore("meta");
   const progress = tx.objectStore("progress");
   const stars = tx.objectStore("stars");
@@ -77,7 +84,7 @@ export async function saveProgress(p: Progress) {
   await tx.done;
 }
 export async function rememberDownloads(episodes: Episode[], podcasts: Library["podcasts"]) {
-  const tx = (await db).transaction(["audio", "meta"], "readwrite");
+  const tx = (await database()).transaction(["audio", "meta"], "readwrite");
   const ids = new Set(await tx.objectStore("audio").getAllKeys());
   const titles = new Map(podcasts.map(podcast => [podcast.id, podcast.title]));
   const meta = tx.objectStore("meta");
@@ -95,14 +102,14 @@ export async function downloadedEpisodes(ids: string[]): Promise<Episode[]> {
   return entries.filter((episode): episode is Episode => !!episode);
 }
 export async function starredEpisodes(): Promise<Episode[]> {
-  const stars: LocalStar[] = await (await db).getAll("stars");
+  const stars: LocalStar[] = await (await database()).getAll("stars");
   return stars.flatMap(({ episode }) => episode ? [episode] : []);
 }
 function starChange(id: string, episode: Episode | null, previous?: LocalStar): LocalStar {
   return { id, episode, updated: Math.max(Date.now(), (previous?.updated ?? 0) + 1), pending: true };
 }
 export async function setStar(episode: Episode, starred: boolean) {
-  const tx = (await db).transaction("stars", "readwrite");
+  const tx = (await database()).transaction("stars", "readwrite");
   const previous: LocalStar | undefined = await tx.store.get(episode.id);
   await tx.store.put(starChange(episode.id, starred ? episode : null, previous));
   await tx.done;
@@ -118,7 +125,7 @@ export function mergeProgress(lib: Library, items: Progress[]): Library {
   };
 }
 export async function localLibrary() {
-  const d = await db;
+  const d = await database();
   const lib = await get<Library>("library");
   if (!lib) return;
   return mergeProgress(lib, await d.getAll("progress"));
@@ -129,7 +136,7 @@ export async function sync(afterMutation = false): Promise<Library> {
   return (syncTask ??= synchronize().finally(() => (syncTask = undefined)));
 }
 async function synchronize() {
-  const d = await db;
+  const d = await database();
   const pending = (await d.getAll("progress")) as Progress[];
   for (const p of pending) {
     await request("progress/" + p.id, "PUT", p);
@@ -150,7 +157,7 @@ async function synchronize() {
   return (await localLibrary())!;
 }
 async function synchronizeStars(remote: StarChange[]) {
-  const d = await db;
+  const d = await database();
   const changes = new Map(remote.map(entry => [entry.id, entry]));
   const sent = new Map<string, number>();
   const local: LocalStar[] = await d.getAll("stars");
@@ -194,19 +201,19 @@ function rememberAudio(id: string, value: Blob) {
   localAudioURLs.set(id, URL.createObjectURL(value));
 }
 export async function downloads(): Promise<string[]> {
-  const keys = (await (await db).getAllKeys("audio")).map(String);
+  const keys = (await (await database()).getAllKeys("audio")).map(String);
   const active = new Set(keys);
   for (const [id, url] of localAudioURLs) {
     if (!active.has(id)) { URL.revokeObjectURL(url); localAudioURLs.delete(id); }
   }
   await Promise.all(keys.filter(id => !localAudioURLs.has(id)).map(async id => {
-    const audio = await (await db).get("audio", id);
+    const audio = await (await database()).get("audio", id);
     if (audio instanceof Blob) rememberAudio(id, audio);
   }));
   return keys;
 }
 export async function drop(id: string, { automatic = false } = {}) {
-  const tx = (await db).transaction(["audio", "meta", "stars"], "readwrite");
+  const tx = (await database()).transaction(["audio", "meta", "stars"], "readwrite");
   const meta = tx.objectStore("meta");
   const stars = tx.objectStore("stars");
   const starred: LocalStar | undefined = await stars.get(id);
@@ -227,7 +234,7 @@ export async function drop(id: string, { automatic = false } = {}) {
   localAudioURLs.delete(id);
 }
 export async function blob(id: string): Promise<Blob | undefined> {
-  return (await db).get("audio", id);
+  return (await database()).get("audio", id);
 }
 export async function download(
   e: Episode,
@@ -268,7 +275,7 @@ export async function download(
     report(total ? Math.round((100 * size) / total) : 0);
   }
   if (!size || (total && size !== total)) throw Error("Incomplete download");
-  const d = await db;
+  const d = await database();
   const tx = d.transaction(["audio", "meta"], "readwrite");
   const audio = new Blob(parts, { type: res.headers.get("Content-Type") || "audio/mpeg" });
   await tx.objectStore("audio").put(audio, e.id);

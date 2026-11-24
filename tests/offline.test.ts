@@ -2,6 +2,23 @@ import "fake-indexeddb/auto";
 import { it, expect, vi } from "vitest";
 import { put, saveProgress, sync, localLibrary } from "../client/storage";
 import type { Library } from "../shared/types";
+
+it("retries opening local storage after a transient failure without losing saved data", async () => {
+  await put("resume-marker", "saved before suspension");
+  vi.resetModules();
+  const storage = await import("../client/storage");
+  const open = vi.spyOn(indexedDB, "open").mockImplementationOnce(() => {
+    throw new DOMException("Storage unavailable", "UnknownError");
+  });
+  try {
+    await expect(storage.get("resume-marker")).rejects.toThrow("Storage unavailable");
+    expect(await storage.get("resume-marker")).toBe("saved before suspension");
+    expect(open).toHaveBeenCalledTimes(2);
+  } finally {
+    open.mockRestore();
+  }
+});
+
 it("retains offline progress and syncs it without replaying an old queue", async () => {
   const lib = {
     podcasts: [],

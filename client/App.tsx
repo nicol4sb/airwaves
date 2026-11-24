@@ -166,6 +166,7 @@ export default function App() {
     [message, msg] = useState(""),
     [ready, setReady] = useState(false),
     [serverReachable, setServerReachable] = useState<boolean>(),
+    [syncError, setSyncError] = useState(""),
     [input, setInput] = useState(""),
     [busy, setBusy] = useState(false);
   const [search, setSearch] = useState(""),
@@ -202,6 +203,7 @@ export default function App() {
   const closeModal = modal === "player" ? playerDismiss.close : dismissModal;
   const backdropPressed = useRef(false);
   const playbackAttempt = useRef(0);
+  const retryConnection = useRef<() => void>(() => {});
   const pendingDelete = useRef(new Set<string>());
   const running = useRef(new Set<string>()),
     last = useRef(0),
@@ -239,32 +241,17 @@ export default function App() {
       } : fresh);
       await refreshDownloads();
       setStarred(await starredEpisodes());
-      setServerReachable(true);
+      setSyncError("");
     } catch (e) {
-      setServerReachable(false);
-      if (navigator.onLine && !(await localLibrary())) report(e);
+      setSyncError(e instanceof Error ? e.message : String(e));
     } finally {
       setReady(true);
     }
   }
   useEffect(() => {
     const login = () => setModal("login");
-    const wake = () => {
-      if (!document.hidden) run(refresh);
-    };
-    const lost = () => setServerReachable(false);
-    window.addEventListener("login-needed", login);
-    const resumeSync = () => {
-      if (!document.hidden) {
-        setServerReachable(undefined);
-        setForeground((n) => n + 1);
-        wake();
-      }
-    };
-    document.addEventListener("visibilitychange", resumeSync);
-    window.addEventListener("online", resumeSync);
-    window.addEventListener("offline", lost);
-    run(async () => {
+    let active = true;
+    const restored = (async () => {
       const initial = (await localLibrary()) ?? empty;
       setLib(initial);
       await rememberDownloads(initial.episodes, initial.podcasts);
@@ -272,15 +259,56 @@ export default function App() {
       setStarred(await starredEpisodes());
       setHiddenStations((await get<RadioStation[]>("hidden-stations")) ?? []);
       setAutoCount((await get<number>("auto")) ?? 0);
-      await refresh();
-    });
-    const timer = setInterval(wake, 30000);
+    })().catch(report);
+    let timer: number;
+    let probe: AbortController | undefined;
+    let lastCheck: boolean | undefined;
+    const check = async () => {
+      window.clearTimeout(timer);
+      probe?.abort();
+      probe = undefined;
+      if (document.hidden || !active) return;
+      const controller = new AbortController();
+      probe = controller;
+      const timeout = window.setTimeout(() => controller.abort(), 8000);
+      let reachable = false;
+      try {
+        const response = await fetch("/health", { cache: "no-store", signal: controller.signal });
+        reachable = response.ok && (await response.json()).ok === true;
+      } catch {
+        // A cached shell or a Wi-Fi connection alone cannot establish reachability.
+      } finally {
+        window.clearTimeout(timeout);
+      }
+      if (!active || probe !== controller) return;
+      probe = undefined;
+      setServerReachable(reachable);
+      if (reachable) {
+        const reconnected = lastCheck === false;
+        void restored.then(() => { if (active) return refresh(reconnected); });
+      } else {
+        void restored.then(() => { if (active) setReady(true); });
+      }
+      lastCheck = reachable;
+      timer = window.setTimeout(check, reachable ? 30000 : 5000);
+    };
+    const resume = () => {
+      if (!document.hidden) setForeground(n => n + 1);
+      void check();
+    };
+    retryConnection.current = check;
+    window.addEventListener("login-needed", login);
+    document.addEventListener("visibilitychange", resume);
+    for (const event of ["focus", "pageshow", "online", "offline"]) window.addEventListener(event, resume);
+    void check();
     return () => {
-      clearInterval(timer);
+      active = false;
+      window.clearTimeout(timer);
+      probe?.abort();
+      retryConnection.current = () => {};
       window.removeEventListener("login-needed", login);
-      document.removeEventListener("visibilitychange", resumeSync);
-      window.removeEventListener("online", resumeSync);
-      window.removeEventListener("offline", lost);
+      document.removeEventListener("visibilitychange", resume);
+      for (const event of ["focus", "pageshow", "online", "offline"]) window.removeEventListener(event, resume);
     };
   }, []);
   const importingEpisodes = lib.podcasts.some(p => p.importPending && !p.error);
@@ -335,7 +363,7 @@ export default function App() {
         } catch (error) {
           if (attempt !== playbackAttempt.current) return;
           if (!(error instanceof TypeError) && !(error instanceof DOMException && error.name === "TimeoutError")) throw error;
-          setServerReachable(false);
+          retryConnection.current();
           await onPhone();
         }
       } else {
@@ -509,7 +537,7 @@ export default function App() {
         if (alive) {
           setPlaying(false);
           if (error instanceof TypeError || (error instanceof DOMException && error.name === "TimeoutError"))
-            setServerReachable(false);
+            retryConnection.current();
           msg(
             "Speaker unavailable. Check its connection or select this device.",
           );
@@ -598,11 +626,9 @@ export default function App() {
       if (readingSpeakers.current === controller) {
         setSpeakers(rooms);
         setSpeakerError("");
-        setServerReachable(true);
       }
-    } catch (error) {
+    } catch {
       if (readingSpeakers.current === controller) {
-        if (error instanceof TypeError || controller.signal.aborted) setServerReachable(false);
         setSpeakers(undefined);
         setSpeakerError("Couldn’t load the speaker list from " + location.host + ". Retrying automatically.");
       }
@@ -673,14 +699,14 @@ export default function App() {
     await drop(e.id);
     setStarred(await starredEpisodes());
     await refreshDownloads();
-    if (starredIds.has(e.id) && navigator.onLine) void refresh(true);
+    if (starredIds.has(e.id) && online) void refresh(true);
   }
   async function toggleStar(e: Episode) {
     const adding = !starredIds.has(e.id);
     if (adding && !starred.length) void navigator.storage?.persist?.().catch(() => {});
     await setStar({ ...e, podcastTitle: name(e) }, adding);
     setStarred(await starredEpisodes());
-    if (navigator.onLine) void refresh(true);
+    if (online) void refresh(true);
   }
   async function markPodcastRead(podcastId: string) {
     const unread = lib.episodes.filter((e) => e.podcastId === podcastId && !e.played);
@@ -1033,9 +1059,14 @@ export default function App() {
         </div>
       </header>
       <main>
-        {!online && (
-          <div className="notice library-notice">
-            <WifiOff size={16} /> Offline library
+        {(serverReachable === false || (serverReachable && syncError)) && (
+          <div className="notice library-notice" role="status">
+            {serverReachable ? <RefreshCw size={16} /> : <WifiOff size={16} />}
+            <span>{serverReachable
+              ? <>Library sync paused. {syncError}</>
+              : <>Offline library. Couldn’t reach <a href="/health" target="_blank" rel="noreferrer">{location.origin}</a>.</>}
+            </span>
+            <button className="secondary" onClick={() => retryConnection.current()}>Retry</button>
           </div>
         )}
         {detailPodcast ? (

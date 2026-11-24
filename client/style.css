@@ -247,6 +247,16 @@ small span {
 .library-notice {
   margin-top: 12px;
 }
+.library-notice span {
+  flex: 1;
+  overflow-wrap: anywhere;
+}
+.library-notice a {
+  color: inherit;
+}
+.library-notice svg {
+  flex-shrink: 0;
+}
 .sectionhead em {
   font: 500 13px/1.2 monospace;
   background: #302d34;

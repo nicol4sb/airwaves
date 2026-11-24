@@ -3,6 +3,9 @@ import react from "@vitejs/plugin-react";
 export default defineConfig({
   root: "client",
   plugins: [react()],
-  server: { host: "127.0.0.1", proxy: { "/api": "http://127.0.0.1:4173" } },
+  server: {
+    host: "127.0.0.1",
+    proxy: { "/api": "http://127.0.0.1:4173", "/health": "http://127.0.0.1:4173" },
+  },
   build: { outDir: "../dist", emptyOutDir: true },
 });

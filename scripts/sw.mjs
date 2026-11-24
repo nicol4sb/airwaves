@@ -26,7 +26,7 @@ self.addEventListener('message', event => {
 self.addEventListener('fetch', event => {
   const request = event.request;
   const url = new URL(request.url);
-  if (request.method !== 'GET' || url.pathname.startsWith('/api/')) return;
+  if (request.method !== 'GET' || url.pathname === '/health' || url.pathname.startsWith('/api/')) return;
   if (request.destination === 'image' && /^https?:$/.test(url.protocol)) {
     let pending = artworkRequests.get(request.url);
     if (!pending) {
