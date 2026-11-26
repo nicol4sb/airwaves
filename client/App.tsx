@@ -203,6 +203,7 @@ export default function App() {
   const closeModal = modal === "player" ? playerDismiss.close : dismissModal;
   const backdropPressed = useRef(false);
   const playbackAttempt = useRef(0);
+  const pendingRemoteSeek = useRef<number | undefined>(undefined);
   const retryConnection = useRef<() => void>(() => {});
   const { updateReady, checkForUpdate } = useAppUpdates();
   const pendingDelete = useRef(new Set<string>());
@@ -518,17 +519,18 @@ export default function App() {
   useEffect(() => {
     if (!remote || remoteUnavailable) return;
     let alive = true,
-      running = false;
+      running = false,
+      timer: number | undefined;
     const poll = async () => {
       if (running) return;
       running = true;
       try {
         const s = await remote.status();
         if (!alive) return;
-        setPosition(s.position);
+        if (pendingRemoteSeek.current === undefined) setPosition(s.position);
         setPlaying(s.playing);
         setVolume(remote.volumeLevel);
-        if (!current.current.id || current.current.id.startsWith("radio:")) return;
+        if (!s.playing || !current.current.id || current.current.id.startsWith("radio:")) return;
         const e = lib.episodes.find((e) => e.audio === s.audio);
         if (e) {
           if (current.current.id && current.current.id !== e.id) {
@@ -550,11 +552,19 @@ export default function App() {
         running = false;
       }
     };
-    void poll();
-    const t = setInterval(poll, 5000);
+    const pollAndSchedule = async () => {
+      await poll();
+      if (alive && current.current.playing && timer === undefined) {
+        timer = window.setTimeout(() => {
+          timer = undefined;
+          void pollAndSchedule();
+        }, 5000);
+      }
+    };
+    void pollAndSchedule();
     return () => {
       alive = false;
-      clearInterval(t);
+      if (timer !== undefined) window.clearTimeout(timer);
     };
   }, [remote, remoteUnavailable]);
   async function choose(s?: Speaker) {
@@ -1283,7 +1293,25 @@ export default function App() {
                   min="0"
                   max={episode.duration || pos || 1}
                   value={pos}
-                  onChange={(e) => run(() => seek(+e.target.value))}
+                  onChange={(e) => {
+                    const value = +e.target.value;
+                    setPosition(value);
+                    if (remote) pendingRemoteSeek.current = value;
+                    else run(() => seek(value));
+                  }}
+                  onPointerUp={(e) => {
+                    if (!remote || pendingRemoteSeek.current === undefined) return;
+                    const value = pendingRemoteSeek.current;
+                    pendingRemoteSeek.current = undefined;
+                    run(() => seek(value));
+                    e.currentTarget.blur();
+                  }}
+                  onKeyUp={(e) => {
+                    if (!remote || pendingRemoteSeek.current === undefined) return;
+                    const value = pendingRemoteSeek.current;
+                    pendingRemoteSeek.current = undefined;
+                    run(() => seek(value));
+                  }}
                 />
                 <div className="time">
                   <span>{fmt(pos)}</span>
